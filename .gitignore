@@ -1,0 +1,6 @@
+# Build output (make -C mpc)
+build/
+
+# Python
+__pycache__/
+*.py[oc]
