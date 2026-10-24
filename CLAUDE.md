@@ -6,11 +6,12 @@ MPC app and the Midimix, both ways. Above all, the Midimix's mute / solo / rec-a
 (and bank) LEDs must follow what happens on the MPC, including changes made on the
 MPC's screen and pads. Not a VST plugin.
 
-## Status (2026-10-22)
+## Status (2026-10-24)
 
 - Recon done on the Key 37 (MPC 3.9.1.2), see below.
 - Midimix LEDs answer note on vel 127 on the same note (checked with `seqtool`, 2026-10-22).
-- Decided: the bridge daemon below ("Plan"). Next: milestone 1.
+- Decided: the bridge daemon below ("Plan"). Reading MPC's state from its memory works (milestone 1,
+  "Reading MPC's state" below); still to do there: a listening test during polling. Next: milestone 2.
 - MPC's hidden **Lua scripting** (below) could read and set every track's state but nothing
   reaches it in this firmware: no console, script folders never read. The flag file
   `/data/scriptingDefaultEnabled` is still on the unit (user's OK, 2026-10-22); not yet saved into
@@ -23,7 +24,12 @@ MPC's screen and pads. Not a VST plugin.
   `/etc/systemd/system/acvs.service.d/90-mpc-addins.conf` come from mpc-vst-plugins' **addin**
   framework (MIT, `../torpedo/mpc/mpc-vst-plugins/docs/ADDINS.md`): one `LD_PRELOAD` list shared
   by every addin, install / uninstall scripts, a reload unit for the first start after a boot.
-  Installed today: `remote` (the MPC MCP server, seq client "MPC Remote", HTTP 6720).
+  Installed: `remote` (the MPC MCP server, seq client "MPC Remote", HTTP 6720) and mpc-tests'
+  `privtap` (logs the surface's rawmidi to `/tmp/privtap.log`; bytes written to the FIFO
+  `/dev/midi_inject` reach MPC as if from the surface, which is how the MCP's `press_button` works).
+- **New Project restarts the app** (seen twice 2026-10-24, once with no reader running): MPC exits
+  cleanly (status 0), systemd starts it again, and it opens on the startup "Select Demo" screen.
+  Whether stock MPC (without the two addins) does the same is untested.
 - `acvs.service` runs `/usr/bin/az01-launch-MPC`; the app is `/usr/bin/MPC` (112 MB, JUCE, PIE).
 - **No app symbols**: the 8000 exported symbols are bundled libraries only (CryptoPP, pugixml,
   Elastique, Superpowered, Ableton Link, Hermes, Yoga, Lua/sol2). RTTI type names are there
@@ -100,38 +106,75 @@ From the binary's docstrings (`strings`, offsets ~78.2–78.7 MB):
   blinking cyan = soloed (Shift + pad), `080000` dim red = silenced by a solo, `000000` = no track.
   Only while that mode is on the pads.
 
-## Plan: the bridge, `midimixd` (decided with the user 2026-10-22)
+## Plan: the bridge, `midimixd` (decided with the user 2026-10-22, reading revised 2026-10-24)
 
-The Lua scripting could not be reached (above), so: a separate C daemon on the MPC that owns the
-LED state and corrects it from what MPC shows on its own surface. No change to the MPC process.
-Reading MPC's internal state (reverse engineering, an addin) stays a later research track.
+The Lua scripting could not be reached (above), so: a separate C daemon on the MPC that reads the
+mute / solo / arm state straight from MPC's memory and drives the Midimix LEDs from it. Read-only,
+no change to the MPC process. How the bridge sends orders to MPC is a separate, open subject.
 
 - **Process:** static musl like `seqtool` (kernel seq ioctls), started by systemd before `acvs`
-  (ask before installing the unit). It finds the Midimix by name, not client number.
+  (ask before installing the unit). It finds the Midimix by name, not client number, and MPC by
+  pid (it follows MPC's restarts).
+- **Reading MPC's state:** `process_vm_readv` on `/usr/bin/MPC` as root: no ptrace stop, no writes,
+  no calls into MPC. Method and offsets come from the sibling project mpc-tests
+  (`../mpc/findings/live-state.md`, `../mpc/tools/profiles/key37-mpc3.9.1.2.json`): find the
+  `Project` by its vtable in the heap, then TrackPool → user tracks (UI order) → Track (rec arm)
+  → Program (mute, solo, silenced by a solo, volume). Results below ("Reading MPC's state"). Pinned to 3.9.1.2's GNU build ID: on any other build
+  the bridge reads nothing and lights the LEDs from its own presses only. Poll at 20–30 Hz, check
+  every read (vtables, 0 / 1 flags, vector bounds), find the Project again when a check fails,
+  send only the LEDs that changed. Prototype: `mpc/mpcstate`.
 - **MIDI path:** the bridge subscribes to the Midimix and creates a seq port "Midimix Bridge" that
   MPC lists as an input. In MPC (Preferences > MIDI / Sync) the Midimix input's Control goes off
   and the bridge port's Control on, so MPC only gets translated messages.
 - **Banks:** strips follow tracks 1–8, bank left / right page by 8 (user's choice). Strip n of bank b
-  is track t = 8b + n. The bridge sends one fixed message per track and function (draft: mute =
-  ch 1 note t−1, solo = ch 2, rec arm = ch 3, fader = ch 4 CC t−1; knobs and master to decide).
-- **MPC side:** MIDI Learn does the muting (user's choice): learned once per track and function.
-  Learn one by hand, save it, read the file and generate the rest if the format allows. If MIDI
-  Learn takes absolute values (127 on / 0 off), use them: a press then always does what the LED
-  shows, and a drifted LED heals on the first press. Otherwise toggles.
-- **State per track:** mute, solo, arm, each known or unknown. Sources: the bridge's own presses;
-  usbmon on bus 1 (MPC's surface): a mirror of the 16 pad colours kept from MPC's start, the Track
-  Mute mode LED (CC 43) and the pad bank LEDs (CC 35…), so in Track Mute mode every visible track's
-  mute / solo is known; the selected track's CC 76 / 77 / 74 once we can tell which track that is.
-- **LEDs:** mute lit = muted (default, could be a setting: Ableton lights active tracks), solo
-  notes = soloed, arm = armed, bank left lit when b > 0.
-- **Known gaps:** mutes made on the screen outside Track Mute mode, other tracks' rec arm, project
-  loads: fixed by the next Track Mute visit or the next press. Faders jump when changing bank
-  (no pickup: MPC sends no volume back).
-- **To check first:** pad → track order and pad banks in Track Mute mode; what MIDI Learn offers
-  for track mute / solo / arm / volume (absolute or toggle) and how it stores mappings;
-  `TrackMuteUseTrackColours` (pads in track colours) changes the colour rules.
-- **Milestones:** 1. seq in / out, bank paging, own-state LEDs, bridge port (no MPC change but MIDI
-  prefs and learn). 2. usbmon reader and Track Mute mirror. 3. systemd unit and install / uninstall.
+  is normal track t = 8b + n in the TrackPool's order.
+- **Orders to MPC (open):** draft is MIDI Learn (user's choice), learned once per track and
+  function, one fixed message per track and function (mute = ch 1 note t−1, solo = ch 2, rec arm =
+  ch 3, fader = ch 4 CC t−1; knobs and master to decide). Since the bridge knows the state, it can
+  send a toggle only when the state differs from what the press asks for.
+- **LEDs:** mute lit = muted (default; "silenced" is there too if the LEDs should show what is
+  audible, as Ableton does), solo notes = soloed, arm = armed, bank left lit when b > 0.
+- **Faders:** pickup (soft takeover) is possible: the track volume is in memory (below). The curve
+  from a MIDI CC to MPC's gain depends on how orders reach MPC.
+- **Milestones:** 1. reader prototype, validate reading (done 2026-10-24 but the listening test).
+  2. seq in / out, bank paging, LEDs from the reader, bridge port. 3. orders to MPC. 4. systemd
+  unit and install / uninstall.
+- Dropped: mirroring MPC's own surface through usbmon (pad colours in Track Mute mode, CC 76 /
+  77 / 74). `tools/usbmon.py` stays a recon tool.
+
+## Reading MPC's state (`mpc/mpcstate`, checked on the Key 37 2026-10-24)
+
+`mpcstate` reads with `process_vm_readv` only: 5 calls per poll, one per level of pointers.
+Offsets are in its source, pinned to 3.9.1.2's GNU build ID (`8371199f…`); vtables are offsets
+from the load address (0x400000).
+
+- **Tracks:** the TrackPool holds several Track vectors (begin / end / capacity). **+0x74 is every
+  user track in the UI's order**, audio included, so it's the one for banks. mpc-tests' "normal"
+  vector (+0x44) leaves audio tracks out. The others are listed in `mpcstate.c`. The Track Mute
+  pads (T01…) and Project +0x15C (selected index, 0-based) follow the +0x74 order. The selected
+  index lags the selected-track pointer by one poll.
+- **Flags:** Program +0x78 mute, +0xC0 solo, +0x1AC silenced (by its own mute or another track's
+  solo; a soloed muted track is not silenced); Track +0x494 rec arm. Checked on plugin, drum,
+  audio, keygroup, MIDI and CV tracks, from MUTE / SOLO / REC ARM, from Track Mute pads, and on the
+  screen. **Per-sequence mutes** ("Track Mute State Per Sequence", on by default): MPC copies the
+  sequence's mutes into Program +0x78 within 1–2 polls of a sequence change, so nothing more to read.
+- **Volume:** Program +0x500, a linear gain (1.0 = 0 dB, 0.397 = −8.02 dB, 1.058 = +0.49 dB),
+  with copies at +0x504, +0x510, +0x51C, +0x520, +0x52C, +0x5AC. A MIDI track's fader is a CC
+  value instead (0–127): not looked at.
+- **Topology:** adding tracks, deleting one (flags follow their track), loading a demo (tracks
+  appear one by one during the import) and MPC's restart were all followed without a bad read. The
+  Project stayed at the same address through a project load; after a restart the watcher finds
+  the new pid's Project about 4 s after MPC starts (the heap scan only finds it once the startup
+  screen is up). The Project was always in `[heap]` (207–249 MB, scanned in 0.3–0.4 s).
+  Reordering tracks: no UI for it found in 3.9 (the Arrange track menu has none).
+- **Cost:** a full poll of 10 tracks takes ~100–120 µs (p99 < 0.5 ms). At 30 Hz the reader uses
+  0.4% of a core, at 200 Hz 2.5%. During playback of the HipHop demo MPC used 45–46% of a core
+  with or without 30 Hz polling, 48% at 200 Hz. MPC logged nothing about audio, but it may not
+  log xruns: **a listening test is still to do**. The kernel has `PER_VMA_LOCK` and MPC's memory
+  is all resident (RSS = size), so MPC's page faults don't wait on the reader's mmap lock.
+- **For midimixd:** the "lost" state shouldn't rescan blindly: each scan costs ~0.4 s of CPU. Watch
+  for a new MPC pid, and back off. A bad poll while the Project's vtables still match is MPC in
+  the middle of a change: keep polling.
 
 ## Recon
 
@@ -183,6 +226,11 @@ motorised).
 - `make -C mpc deploy` builds `mpc/seqtool/seqtool.c` (static, kernel `/dev/snd/seq` ioctls, no
   libasound) and copies it to `/tmp/seqtool` on the MPC: `seqtool ports`, `seqtool send 28:0 90 01
   7f` (note / CC only, never SysEx), `seqtool dump 28:0 [secs]`. The Midimix is client 28 today.
+- `make -C mpc deploy` also builds `mpc/mpcstate/mpcstate.c` into `/tmp/mpcstate`: `mpcstate show`
+  (every track's mute / solo / arm / silenced), `mpcstate watch [secs] [hz]` (prints changes, then
+  timings; run it with `setsid … > /tmp/mpcstate-watch.log &` to watch while driving the MPC),
+  `mpcstate dump project | track|program <n> | at <hex> <bytes>` (raw bytes, to diff on the host).
+  Read-only, safe while MPC runs.
 - `uv run python tools/usbmon.py decode captures/<name>.log [--all]`: one line per message,
   pad-colour bursts on one line. `captures/2026-10-22-map-trackmute.log` came from the text API
   and stops at 32 bytes per transfer (half the pads).
