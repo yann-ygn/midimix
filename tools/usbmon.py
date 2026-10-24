@@ -108,8 +108,9 @@ def decode(path, show_all):
     pads = []  # pad colours of the current burst, printed as one line
     for line in decode_lines(path, show_all):
         stamp, text = line[:9], line[10:]
-        if text.startswith("MPC app -> MPC public: sysex ") and pad_rgb(bytes.fromhex(text[29:])):
-            pad, rgb = pad_rgb(bytes.fromhex(text[29:]))
+        prefix = "host -> MPC public: sysex "
+        if text.startswith(prefix) and pad_rgb(bytes.fromhex(text[len(prefix):])):
+            pad, rgb = pad_rgb(bytes.fromhex(text[len(prefix):]))
             if pads and pads[0][0] != stamp:
                 print(f"{pads[0][0]} pads: " + " ".join(f"{p}={c}" for _, p, c in pads))
                 pads = []
@@ -163,7 +164,8 @@ def decode_lines(path, show_all):
                 if not show_all and (msg[0], msg[1] if len(msg) > 1 else None) in KEEPALIVE:
                     continue
                 who = name_of(bus, int(dev), cable)
-                arrow = f"MPC app -> {who}" if direction == "->" else f"{who} -> MPC app"
+                # host: the MPC's side of the USB bus (the MPC app, or midimixd on bus 3)
+                arrow = f"host -> {who}" if direction == "->" else f"{who} -> host"
                 yield f"{stamp} {arrow}: {describe(msg)}"
             if len(data) < length:  # the rest of a sysex cut here never arrives
                 for key in [k for k in sysex if k[:3] == (bus, dev, ep)]:
