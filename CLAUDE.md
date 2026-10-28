@@ -13,8 +13,9 @@ MPC's screen and pads. Not a VST plugin.
 - The bridge (`mpc/midimixd`, below) runs on mpc-tests' **native API**, an addin inside MPC ("MPC's
   native API" below): LEDs from its watch stream, buttons, faders and pan knobs as its commands.
   Milestone 3, checked on the Key 37 2026-10-28 with presses sent to its port; not yet tried by hand
-  on the hardware. Not checked yet: a Midimix replug. Next: milestone 4 (systemd unit, install /
-  uninstall), then milestone 5, the mapping editor: an MPC plugin like torpedo's (below).
+  on the hardware. Not checked yet: a Midimix replug. Installed on the Key 37 as a systemd service
+  that starts with MPC (milestone 4, 2026-10-28, checked through a reboot). Next: milestone 5, the
+  mapping editor: an MPC plugin like torpedo's (below).
 - The memory reader of milestones 1–2 (`mpc/mpcread`, "Reading MPC's state from memory" below) is
   now only behind `mpcstate`, a diagnostic tool.
 - MPC's hidden **Lua scripting** (below) could read and set every track's state but nothing
@@ -33,6 +34,11 @@ MPC's screen and pads. Not a VST plugin.
   `privtap` (logs the surface's rawmidi to `/tmp/privtap.log`; bytes written to the FIFO
   `/dev/midi_inject` reach MPC as if from the surface, which is how the MCP's `press_button` works),
   and mpc-tests' `mpc-native-api` (below).
+- **systemd reads its units before `/etc` is mounted** (`etc.mount`, 5.7 s into the 2026-10-26
+  boot), so a unit enabled in `/etc` isn't started at boot, and a drop-in there is only seen after a
+  `daemon-reload`. The addins' `mpc-addins-reload.service` (rootfs, wanted by `acvs`) does one at
+  ~7.9 s, before MPC starts (~9.1 s). A reload doesn't queue the units it newly makes wanted, so
+  midimixd is started from MPC's own unit (milestone 4, below).
 - **SOLO on the Main screen (or the MPC X's SOLO, note 77) solos the selected track, and the solo
   follows the selection**: select another track and the solo moves to it (seen 2026-10-24).
 - **New Project restarts the app** (seen twice 2026-10-24, once with no reader running): MPC exits
@@ -101,7 +107,8 @@ From the binary's docstrings (`strings`, offsets ~78.2–78.7 MB):
   usages. Nothing on the MPC opens it (2026-10-28). Probably the editor's or a firmware updater's
   channel; never seen in use, and nobody has published the editor's protocol.
 - The app opens its surface with raw MIDI (card 0, subdevices 0 Public / 1 Private / 2 Port A) and
-  every other port through the ALSA sequencer as client 129 "MPC" (JUCE also makes client 128).
+  every other port through the ALSA sequencer as client 129 "MPC" (JUCE also makes client 128;
+  since midimixd starts before MPC's client exists, it takes 129 and MPC is 131 after a boot).
   It subscribes to the Midimix both ways and has sent it nothing. A separate process can subscribe
   to it too (sequencer ports are shared). The Midimix's client number changes (28 on 2026-10-22,
   20 on 2026-10-24): find it by its name, "MIDI Mix" (port 0 "MIDI Mix MIDI 1").
@@ -131,12 +138,14 @@ The Lua scripting could not be reached (above). The bridge is a separate C daemo
 talks to mpc-tests' native API (below): its watch says every track's state, its commands change it.
 No memory reading, no MIDI Learn, nothing sent to MPC as MIDI.
 
-- **Process:** static musl like `seqtool` (kernel seq ioctls), to be started by systemd (milestone
-  4: ask before installing the unit). It finds the Midimix by name, not client number, and the API
-  by its socket; it follows the API's and MPC's restarts.
-- **MIDI path:** the bridge subscribes to the Midimix from a private port ("midimixd:Midimix",
-  write only, no SUBS capability, so MPC lists it neither as an input nor an output). MPC's own
-  Midimix input (CONTROL on, nothing learned) stays harmless.
+- **Process:** static musl like `seqtool` (kernel seq ioctls), a systemd service (milestone 4,
+  below). It finds the Midimix by name, not client number, and the API by its socket; it follows
+  the API's and MPC's restarts.
+- **MIDI path:** the bridge subscribes to the Midimix both ways from a private port
+  ("midimixd:Midimix", write only, no SUBS capability, so MPC lists it neither as an input nor an
+  output). The subscription to it matters: the kernel opens a port's MIDI output only while it has a
+  subscriber, so without one LED messages failed (`ENODEV`) whenever MPC's wasn't there (at boot,
+  2026-10-28). MPC's own Midimix input (CONTROL on, nothing learned) stays harmless.
 - **Banks:** strips follow tracks 1–8, bank left / right page by 8 (user's choice). Strip n of bank b
   is the track with `uiIndex` 8b + n: MPC's Track List order, audio tracks included.
 - **LEDs** (decided with the user 2026-10-24): mute steady = muted, **blinking (2 Hz) = silenced by
@@ -156,7 +165,7 @@ No memory reading, no MIDI Learn, nothing sent to MPC as MIDI.
   Sends need automation Off (below); the master channel can't be set through the API.
 - **Milestones:** 1. reader prototype (memory, done 2026-10-24; now a diagnostic). 2. seq in / out,
   bank paging, LEDs (done 2026-10-24). 3. orders to MPC, rebuilt on the native API (done 2026-10-28).
-  4. systemd unit and install / uninstall. 5. the mapping editor (below).
+  4. systemd unit and install / uninstall (done 2026-10-28). 5. the mapping editor (below).
 - Dropped: mirroring MPC's own surface through usbmon (pad colours in Track Mute mode, CC 76 /
   77 / 74), MIDI Learn for orders, a "Midimix Bridge" seq port. `tools/usbmon.py` stays a recon
   tool.
@@ -285,7 +294,33 @@ log, everything restored afterwards:
   CV / keygroup tracks, presses by hand on the hardware (the knobs' CCs other than 16 come from the
   Midimix's default map, not a capture).
 - Milestone 2 (2026-10-24, memory reader) was checked with a usbmon capture of bus 3: every LED
-  message reaches the Midimix; the seq path hasn't changed since.
+  message reaches the Midimix. Checked again through the service (2026-10-28, below).
+
+## midimixd as a service (milestone 4, installed on the Key 37 2026-10-28)
+
+- `make -C mpc install` copies `midimixd/install.sh` and its files to `/tmp/midimixd-install` on the
+  MPC and runs it: `/data/midimixd/midimixd` and `uninstall.sh`, `/etc/systemd/system/midimixd.service`
+  (`Restart=always`, 5 s apart; not restarted after exit status 3, another midimixd running), and
+  the hook `/etc/systemd/system/acvs.service.d/91-midimixd.conf`:
+  `ExecStartPost=-/bin/systemctl --no-block start midimixd.service`, since a unit enabled in `/etc`
+  isn't started at boot (MPC app facts, above). Then `daemon-reload` and a restart of the service;
+  MPC isn't restarted. Run it again to upgrade. `make -C mpc uninstall` runs
+  `/data/midimixd/uninstall.sh`: hook, stop (LEDs off), unit, files. Both scripts take `ROOT=` and
+  `SYSTEMCTL=` to run against a scratch tree (checked with BusyBox sh).
+- Starting at boot depends on the addins' `mpc-addins-reload.service` (install.sh warns without
+  it); the native API is an addin, so it is there whenever midimixd is useful. `systemctl stop
+  midimixd` lasts until MPC's next start. Logs: `journalctl -u midimixd`.
+- One midimixd at a time: it holds `/run/midimixd.lock` (flock) and exits with status 3 when another
+  one does (checked: a second one by hand refused).
+- Checked: a reboot (user's OK) started it at 9.9 s, with MPC's own start, 0.1 s before the API's
+  socket existed; it waited for the API and read MPC's state at 10.7 s (startup screen, 0 tracks).
+  That boot showed the `ENODEV` failures (MIDI path, above), fixed by the subscription to the
+  Midimix: since then the Midimix lists midimixd among its subscribers. A usbmon capture of bus 3
+  across `systemctl stop` / `start`: the two lit LEDs (arm 1, 2) went off on stop; on start all 26
+  off, then those two lit 36 ms later. During MPC's startup the API sent 47 watch lines without a
+  `type`.
+- Not checked yet: the LEDs going off while MPC restarts with a project open, a reboot with the
+  subscription fix.
 
 ## Recon
 
@@ -338,8 +373,10 @@ motorised).
   libasound) and copies it to `/tmp/seqtool` on the MPC: `seqtool ports`, `seqtool send 20:0 90 01
   7f` (note / CC only, never SysEx), `seqtool dump 20:0 [secs]`. The Midimix's client number changes
   (20 on 2026-10-28): check `seqtool ports`.
-- `make -C mpc deploy` also builds `mpc/midimixd` (above; run it with `setsid /tmp/midimixd >
-  /tmp/midimixd.log 2>&1 < /dev/null &`, stop it with `kill $(pidof midimixd)`) and `mpc/mpcstate`
+- `make -C mpc deploy` also builds `mpc/midimixd` (above; the installed service holds the lock, so
+  `systemctl stop midimixd` first, then run it with `setsid /tmp/midimixd > /tmp/midimixd.log 2>&1
+  < /dev/null &`, stop it with `kill $(pidof midimixd)` and `systemctl start midimixd`; deploy
+  renames over running binaries) and `mpc/mpcstate`
   (on `mpc/mpcread`, a diagnostic) into `/tmp`: `mpcstate show`
   (every track's mute / solo / arm / silenced / volume), `mpcstate watch [secs] [hz]` (prints changes, then
   timings; run it with `setsid … > /tmp/mpcstate-watch.log &` to watch while driving the MPC),

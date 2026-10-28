@@ -4,6 +4,8 @@
 //
 //   midimixd [-v]        -v: also log every LED message, what the Midimix sends and the API traffic
 //
+// Exits with status 3 when another midimixd is running (the systemd unit, see install.sh).
+//
 // Strips: 8 tracks at a time in MPC's Track List order; bank left / right page by 8.
 // LEDs: mute steady = muted, blinking = silenced by another track's solo; solo = soloed (the Midimix
 // shows the solo LEDs on the mute row while SOLO is held, by itself); rec arm = armed; bank left /
@@ -28,6 +30,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/ioctl.h>
 #include <time.h>
 #include <unistd.h>
@@ -37,6 +40,7 @@
 #include "api.h"
 
 #define MIDIMIX_NAME    "MIDI Mix"  // its ALSA sequencer client
+#define LOCK_FILE       "/run/midimixd.lock"
 #define STRIPS          8
 #define NOTE_BANK_LEFT  25
 #define NOTE_BANK_RIGHT 26
@@ -131,6 +135,13 @@ static int find_midimix(void) {
             .sender = p.addr, .dest = {.client = (unsigned char)my_client, .port = (unsigned char)my_port}};
         if (ioctl(seq_fd, SNDRV_SEQ_IOCTL_SUBSCRIBE_PORT, &sub) < 0 && errno != EBUSY) {
             say("Midimix at %d:%d, but subscribing failed: %s", p.addr.client, p.addr.port, strerror(errno));
+            return 0;
+        }
+        // And to it: the kernel only keeps its MIDI output open while it has a subscriber. Without
+        // ours, every LED message failed (ENODEV) until MPC subscribed, at boot (2026-10-28).
+        struct snd_seq_port_subscribe out = {.sender = sub.dest, .dest = p.addr};
+        if (ioctl(seq_fd, SNDRV_SEQ_IOCTL_SUBSCRIBE_PORT, &out) < 0 && errno != EBUSY) {
+            say("Midimix at %d:%d, but subscribing to it failed: %s", p.addr.client, p.addr.port, strerror(errno));
             return 0;
         }
         midimix = p.addr;
@@ -466,6 +477,14 @@ int main(int argc, char **argv) {
         return 2;
     }
     setvbuf(stdout, NULL, _IOLBF, 0);
+    // One at a time: two would fight over the LEDs, and every press would toggle twice.
+    int lock = open(LOCK_FILE, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    if (lock < 0) die("open " LOCK_FILE);
+    if (flock(lock, LOCK_EX | LOCK_NB) < 0) {
+        if (errno != EWOULDBLOCK) die("lock " LOCK_FILE);
+        fprintf(stderr, "midimixd: already running (systemctl stop midimixd, or kill it)\n");
+        return 3;
+    }
     t_start = now();
     struct sigaction sa = {.sa_handler = on_signal};
     sigaction(SIGINT, &sa, NULL);

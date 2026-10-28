@@ -1,0 +1,16 @@
+[Unit]
+Description=Akai Midimix as a control surface for MPC (midimixd)
+# Started by MPC's own unit (acvs.service.d/91-midimixd.conf) rather than enabled: see install.sh.
+# It finds the Midimix and MPC's native API by itself and follows their restarts, so it keeps
+# running while MPC restarts.
+ConditionPathExists=/data/midimixd/midimixd
+
+[Service]
+ExecStart=/data/midimixd/midimixd
+Restart=always
+# 5 s apart, a crash loop stays under systemd's start limit (5 starts in 10 s) and keeps retrying.
+RestartSec=5
+# 3: another midimixd is running (one started by hand).
+RestartPreventExitStatus=3
+# SIGTERM: midimixd turns the Midimix's LEDs off and exits.
+TimeoutStopSec=5
