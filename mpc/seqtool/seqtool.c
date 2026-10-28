@@ -5,8 +5,8 @@
 //   seqtool send <client>:<port> <status> <data1> <data2> [...]   hex bytes, 3 per message
 //   seqtool dump <client>:<port> [seconds]
 //
-// Only note on (9n), note off (8n) and control change (Bn) are sent: never SysEx (the Midimix
-// editor rewrites the unit's mapping over SysEx).
+// Only note on (9n), note off (8n) and control change (Bn) are sent: never SysEx (Akai's editor
+// may rewrite the unit's mapping over SysEx).
 
 #include <errno.h>
 #include <fcntl.h>

@@ -14,7 +14,7 @@ MPC's screen and pads. Not a VST plugin.
   native API" below): LEDs from its watch stream, buttons, faders and pan knobs as its commands.
   Milestone 3, checked on the Key 37 2026-10-28 with presses sent to its port; not yet tried by hand
   on the hardware. Not checked yet: a Midimix replug. Next: milestone 4 (systemd unit, install /
-  uninstall), the top two knobs.
+  uninstall), then milestone 5, the mapping editor: an MPC plugin like torpedo's (below).
 - The memory reader of milestones 1–2 (`mpc/mpcread`, "Reading MPC's state from memory" below) is
   now only behind `mpcstate`, a diagnostic tool.
 - MPC's hidden **Lua scripting** (below) could read and set every track's state but nothing
@@ -94,6 +94,12 @@ From the binary's docstrings (`strings`, offsets ~78.2–78.7 MB):
 - ALSA cards (numbered differently from one boot to the next): "MPC Key 37" (internal surface, USB
   bus 1 dev 2), ACVR (audio), f_midi (USB gadget to a computer), "MIDI Mix" (USB bus 3; it also
   exposes `/dev/hidraw0`).
+- The Midimix (USB 09e8:0031, bcdDevice 2.00) has three interfaces: 0 HID, 1 audio control,
+  2 USB-MIDI (endpoints 0x02 / 0x82), which carries every control and LED. The HID one
+  (`/dev/hidraw0`, hid-generic) is a bare vendor pipe: usage page 0xFFA0, no report IDs, one
+  32-byte input and one 32-byte output report, interrupt endpoints 0x81 / 0x01 at 1 ms, no control
+  usages. Nothing on the MPC opens it (2026-10-28). Probably the editor's or a firmware updater's
+  channel; never seen in use, and nobody has published the editor's protocol.
 - The app opens its surface with raw MIDI (card 0, subdevices 0 Public / 1 Private / 2 Port A) and
   every other port through the ALSA sequencer as client 129 "MPC" (JUCE also makes client 128).
   It subscribes to the Midimix both ways and has sent it nothing. A separate process can subscribe
@@ -146,14 +152,43 @@ No memory reading, no MIDI Learn, nothing sent to MPC as MIDI.
 - **Pan:** each strip's bottom knob (the one above mute; user's choice 2026-10-28), with pickup like
   the faders: CC / 128, so that CC 64 is the centre (0.5), and CC 127 is hard right (1.0). The
   session's pans were all multiples of 1/128 (2026-10-28).
-- **Top two knobs and master fader:** nothing yet. Sends need automation Off (below); the master
-  channel can't be set through the API.
+- **Top two knobs and master fader:** nothing yet; the knobs get theirs from the editor (below).
+  Sends need automation Off (below); the master channel can't be set through the API.
 - **Milestones:** 1. reader prototype (memory, done 2026-10-24; now a diagnostic). 2. seq in / out,
   bank paging, LEDs (done 2026-10-24). 3. orders to MPC, rebuilt on the native API (done 2026-10-28).
-  4. systemd unit and install / uninstall.
+  4. systemd unit and install / uninstall. 5. the mapping editor (below).
 - Dropped: mirroring MPC's own surface through usbmon (pad colours in Track Mute mode, CC 76 /
   77 / 74), MIDI Learn for orders, a "Midimix Bridge" seq port. `tools/usbmon.py` stays a recon
   tool.
+
+## Plan: the mapping editor, an MPC plugin (decided with the user 2026-10-28)
+
+- **Not Akai's way:** Akai's editor (Windows / macOS) only changes the CC / note number and channel
+  each control sends, written into the unit (over SysEx or the HID pipe, unknown). With midimixd in
+  between that would break it (a button must send the note that lights its LED) and can't say "send
+  2 of the strip's track". So the Midimix keeps its factory map; the mapping lives in midimixd.
+- **Form:** like torpedo's MPC plugin (`../torpedo/mpc/plugin/`, see `../torpedo/CLAUDE.md`): a
+  silent instrument on mpc-vst-plugins' VST2 wrapper, its page on MPC's screen (`layout.conf`, the
+  skin studio, the browser renderer), its presets in MPC's PRESET menu. Torpedo is the user's
+  code: reuse it.
+- **midimixd** gets a control socket (root only, like the API's): read and replace the mapping, and
+  report each control as it moves, so that touching one on the Midimix picks its row on the page.
+  Its built-in default is today's mapping. It must keep working without the plugin.
+- **Per project** (user's choice): the plugin keeps the mapping in its state chunk (the wrapper's
+  `state` key), so a project brings its mapping back when it loads. In a project without the plugin
+  midimixd falls back to its default: it sees the project change in the API's references
+  (`projectId`; that it changes on a project load is unchecked).
+- **Rows first** (user's choice): one target per row, the same for the 8 strips: top, middle,
+  bottom knob, fader, mute, solo, rec arm. Knobs and faders take volume, pan, send 1–4
+  (`set_send_level`, automation Off only) or nothing; buttons mute, solo, rec arm, insert slot 1–4
+  on / off (`set_insert_enabled`, the LED showing the slot) or nothing. Per-control exceptions
+  maybe later. The master fader stays free (no API setter for it).
+- **To sort out:** the plugin's own track is a plugin track, so it is in the Track List and would
+  take a strip: midimixd should skip it (the API gives each track's `name` and `type`; whether it
+  says which plugin a track holds is unchecked). The API refuses commands outside Main, the Channel
+  Mixer pages and Track Mute, so probably on the plugin's page too: picking a row from the Midimix
+  still works (only the plugin hears it), trying the mapping means leaving the page. Installing
+  into `/storage/Synths/` and the `acvs` restart a skin change needs: ask first (as in torpedo).
 
 ## MPC's native API (mpc-tests' `mpc-native-api` addin, 0.13.0, checked 2026-10-28)
 
@@ -321,8 +356,9 @@ motorised).
   `LD_PRELOAD`), and before writing anywhere outside a scratch folder on the MPC (`/tmp`).
 - Never commit Akai's files (the MPC binary, skins, MIDI Learn maps, firmware): analyse them in
   the scratchpad only.
-- Don't send SysEx to the Midimix that hasn't been seen in a capture: its editor rewrites the
-  unit's mapping over SysEx.
+- Don't send the Midimix SysEx that hasn't been seen in a capture, nor anything on its HID
+  interface: Akai's editor rewrites the unit's mapping over one of the two (which one is unknown),
+  and an unknown command could as well start a firmware update.
 - TheKikGen's MPCLiveXplore-libs: LICENSE says CC0 but its sources carry CC BY-NC 4.0 headers.
   Read it, don't copy it.
 
