@@ -51,7 +51,7 @@ static int last_id;
 static char rid_prefix[48];
 static struct json js;
 
-static const char *const OPS[] = {"set_mute", "set_solo", "set_record_armed", "set_volume"};
+static const char *const OPS[] = {"set_mute", "set_solo", "set_record_armed", "set_volume", "set_pan"};
 
 static void trouble(const char *fmt, ...) {
     char msg[sizeof problem];
@@ -137,6 +137,8 @@ static int fill_track(struct api_track *t, int node) {
     copy(t->mixer_gen, sizeof t->mixer_gen, id_of(json_get(&js, mixer, "generation")));
     double v = json_num(&js, json_get(&js, mixer, "volume"), -1);
     t->volume = v >= 0 && v <= 1 ? (float)v : -1;
+    v = json_num(&js, json_get(&js, mixer, "pan"), -1);
+    t->pan = v >= 0 && v <= 1 ? (float)v : -1;
     return 0;
 }
 
@@ -337,7 +339,8 @@ int api_send(enum api_op op, int t, double value, int expected) {
         say("API: %d commands already waiting, not sending more", MAX_CMDS);
         return -1;
     }
-    if ((op == API_MUTE && !api.mute_scope) || (op == API_VOLUME && !tr->mixer_gen[0])) return -1;
+    int mixer = op == API_VOLUME || op == API_PAN;
+    if ((op == API_MUTE && !api.mute_scope) || (mixer && !tr->mixer_gen[0])) return -1;
 
     char req[1024];
     int id = ++last_id;
@@ -345,7 +348,7 @@ int api_send(enum api_op op, int t, double value, int expected) {
                                   "{\"apiVersion\":\"0.1\",\"op\":\"%s\",\"requestId\":\"%s-%d\",\"target\":{\"instanceId\":"
                                   "\"%s\",\"projectId\":\"%s\",\"trackId\":\"%s\"}",
                                   OPS[op], rid_prefix, id, api.instance, api.project, tr->id);
-    if (op == API_VOLUME) {
+    if (mixer) {
         value = value < 0 ? 0 : value > 1 ? 1 : value;
         len += (size_t)snprintf(req + len, sizeof req - len, ",\"mixerGeneration\":\"%s\",\"value\":%.9g", tr->mixer_gen,
                                 value);

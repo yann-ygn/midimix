@@ -1,4 +1,4 @@
-// api: midimixd's client for mpc-tests' native API (the "MPC Native API" addin in MPC, 0.12.0:
+// api: midimixd's client for mpc-tests' native API (the "MPC Native API" addin in MPC, 0.13.0:
 // ../mpc/native-api/README.md and WATCH.md) on its Unix socket. A watch subscription keeps the
 // model below current (a full snapshot, then changes); commands go out on one short connection
 // each and come back as receipts. Everything is non-blocking, driven by the program's poll loop.
@@ -21,6 +21,7 @@ struct api_track {
     char name[64], type[16];
     signed char mute, solo, arm, silenced;  // 1, 0, or -1 when the API can't read it on this track
     float volume;                           // normalized 0-1 (the fader's position), or -1
+    float pan;                              // normalized 0-1, 0.5 = centre, or -1
 };
 
 struct api_state {
@@ -34,7 +35,7 @@ struct api_state {
 
 extern struct api_state api;
 
-enum api_op { API_MUTE, API_SOLO, API_ARM, API_VOLUME };
+enum api_op { API_MUTE, API_SOLO, API_ARM, API_VOLUME, API_PAN };
 
 struct api_result {
     int id;  // what api_send returned
@@ -52,7 +53,8 @@ double now(void);
 
 void api_init(void (*on_result)(const struct api_result *));
 // Sends a desired-state command to track t (an index in api.t): value 0 / 1 for the flags, 0-1 for
-// API_VOLUME. expected 0 / 1: the flag's value MPC must still have when the command runs, or -1.
+// API_VOLUME and API_PAN. expected 0 / 1: the flag's value MPC must still have when the command runs,
+// or -1.
 // Returns an id > 0, passed back once with the result; -1 if nothing was sent.
 int api_send(enum api_op op, int t, double value, int expected);
 // The sockets to poll (POLLIN), and what to do with their events.

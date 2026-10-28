@@ -11,10 +11,10 @@ MPC's screen and pads. Not a VST plugin.
 - Recon done on the Key 37 (MPC 3.9.1.2), see below.
 - Midimix LEDs answer note on vel 127 on the same note (checked with `seqtool`, 2026-10-22).
 - The bridge (`mpc/midimixd`, below) runs on mpc-tests' **native API**, an addin inside MPC ("MPC's
-  native API" below): LEDs from its watch stream, buttons and faders as its commands. Milestone 3,
-  checked on the Key 37 2026-10-28 with presses sent to its port; not yet tried by hand on the
-  hardware. Not checked yet: a Midimix replug, an MPC restart while it runs. Next: milestone 4
-  (systemd unit, install / uninstall), the knobs.
+  native API" below): LEDs from its watch stream, buttons, faders and pan knobs as its commands.
+  Milestone 3, checked on the Key 37 2026-10-28 with presses sent to its port; not yet tried by hand
+  on the hardware. Not checked yet: a Midimix replug. Next: milestone 4 (systemd unit, install /
+  uninstall), the top two knobs.
 - The memory reader of milestones 1–2 (`mpc/mpcread`, "Reading MPC's state from memory" below) is
   now only behind `mpcstate`, a diagnostic tool.
 - MPC's hidden **Lua scripting** (below) could read and set every track's state but nothing
@@ -142,8 +142,11 @@ No memory reading, no MIDI Learn, nothing sent to MPC as MIDI.
   (refused if MPC changed it in between). The LED shows the press at once; a refused press flashes
   3 times.
 - **Faders:** track volume with pickup (soft takeover), on the API's normalized scale (MPC's fader
-  position, 1.0 = +6 dB): CC / 127. One volume command at a time, at most 10 a second.
-- **Knobs and master fader:** nothing yet. Pan and sends need automation Off (below); the master
+  position, 1.0 = +6 dB): CC / 127. One volume or pan command at a time, at most 10 a second.
+- **Pan:** each strip's bottom knob (the one above mute; user's choice 2026-10-28), with pickup like
+  the faders: CC / 128, so that CC 64 is the centre (0.5), and CC 127 is hard right (1.0). The
+  session's pans were all multiples of 1/128 (2026-10-28).
+- **Top two knobs and master fader:** nothing yet. Sends need automation Off (below); the master
   channel can't be set through the API.
 - **Milestones:** 1. reader prototype (memory, done 2026-10-24; now a diagnostic). 2. seq in / out,
   bank paging, LEDs (done 2026-10-24). 3. orders to MPC, rebuilt on the native API (done 2026-10-28).
@@ -152,7 +155,7 @@ No memory reading, no MIDI Learn, nothing sent to MPC as MIDI.
   77 / 74), MIDI Learn for orders, a "Midimix Bridge" seq port. `tools/usbmon.py` stays a recon
   tool.
 
-## MPC's native API (mpc-tests' `mpc-native-api` addin, 0.12.0, checked 2026-10-28)
+## MPC's native API (mpc-tests' `mpc-native-api` addin, 0.13.0, checked 2026-10-28)
 
 Source and docs in the sibling repo `../mpc` (`native-api/README.md`, `native-api/WATCH.md`,
 `findings/native-*.md`). An addin inside MPC (`/data/mpc-addins/mpc-native-api`), pinned to
@@ -169,13 +172,15 @@ Source and docs in the sibling repo `../mpc` (`native-api/README.md`, `native-ap
 - **Tracks:** every user track in `uiIndex` order (TrackPool +0x74). References are `instanceId` +
   `projectId` + `trackId`. Mute / solo / arm: plugin, drum, keygroup, audio, MIDI, CV tracks. Mixer
   (`mixer.volume` normalized 0–1, pan, sends, inserts): plugin, drum, keygroup, audio.
-- **Commands:** `set_mute` / `set_solo` / `set_record_armed` (boolean, optional `expected`) and
-  `set_volume` (0–1, with the track's `mixer.generation` as `mixerGeneration`). With per-sequence
+- **Commands:** `set_mute` / `set_solo` / `set_record_armed` (boolean, optional `expected`),
+  `set_volume` and `set_pan` (0–1, pan centred at 0.5, with the track's `mixer.generation` as
+  `mixerGeneration`). With per-sequence
   mute on (MPC's default) a mute names the active sequence: `muteScope: "sequence"` plus the
   `sequence` reference from `muteContext`. Allowed on Main, the Channel Mixer pages and Track Mute,
-  stopped or playing a sequence, recording off, automation Off or Read (pan, sends, inserts: Off
-  only); refused elsewhere before anything runs (`NOT_READY` on the Menu screen). Under Read, MPC's
-  automation takes a volume back on its next update (Drums and Bass in the user's session).
+  stopped or playing a sequence, recording off, automation Off or Read (sends, inserts: Off only;
+  pan under Read since 0.13.0); refused elsewhere before anything runs (`NOT_READY` on the Menu
+  screen). Under Read, MPC's automation takes a volume or pan back on its next update (Drums and
+  Bass in the user's session).
   Receipts in 25–42 ms (2026-10-28). A command costs MPC's UI thread about 13–50 ms (mpc-tests'
   measurements): hence the fader throttle.
 
@@ -233,8 +238,17 @@ log, everything restored afterwards:
 - API `host-stop` / `host-start`: LEDs off after 2 s, back with the new instance's snapshot.
 - Bank right refused with 8 tracks; knobs ignored. SIGTERM / SIGINT turn every LED off. 0.2% of a
   core, 568 kB RSS.
-- Not checked yet: a Midimix replug, an MPC restart, more than 8 tracks (bank 2, the API's 16-track
-  pages), MIDI / CV / keygroup tracks, presses by hand on the hardware.
+- Pan knobs (API 0.13.0, 2026-10-28, same way, on the Mixer Volume page): refused on the Menu screen
+  (`NOT_READY`, the knob let go); a plugin and an audio track; 0, 64, 127 gave 0, 0.5, 1; a sweep of
+  16 messages sent 3 commands; pickup from far below by crossing; a pan set through the API let go
+  of the knob until it crossed again; fader and pan knob moved together alternated their commands
+  (10 a second in all) and both reached their last position. Pans and volumes restored exactly.
+- It followed MPC's restart for the API's 0.13.0 install (2026-10-28, from its log: LEDs not looked
+  at). During MPC's startup the API sent ~30 watch lines without a `type` (logged as `unknown watch
+  frame "?"`, not captured), then midimixd carried on by itself.
+- Not checked yet: a Midimix replug, more than 8 tracks (bank 2, the API's 16-track pages), MIDI /
+  CV / keygroup tracks, presses by hand on the hardware (the knobs' CCs other than 16 come from the
+  Midimix's default map, not a capture).
 - Milestone 2 (2026-10-24, memory reader) was checked with a usbmon capture of bus 3: every LED
   message reaches the Midimix; the seq path hasn't changed since.
 

@@ -1,6 +1,6 @@
 // midimixd: the Akai Midimix as a control surface for MPC 3.9.1.2 on the Key 37, through mpc-tests'
-// native API (api.c). The API's watch says what every track's mute / solo / rec arm / volume is; the
-// Midimix's LEDs follow it, and its buttons and faders become API commands.
+// native API (api.c). The API's watch says what every track's mute / solo / rec arm / volume / pan
+// is; the Midimix's LEDs follow it, and its buttons, faders and bottom knobs become API commands.
 //
 //   midimixd [-v]        -v: also log every LED message, what the Midimix sends and the API traffic
 //
@@ -10,10 +10,11 @@
 // right = there are tracks that way. All off while the API can't be read, and on exit.
 // Buttons: mute / solo / rec arm toggle the strip's track. The LED shows the press at once; a press
 // MPC refuses flashes three times.
-// Faders: the strip's track volume, once the fader reaches the track's level (pickup). A change of
-// that volume on MPC's side lets go of the fader until it reaches the new level. One volume command
-// at a time, at most 10 a second: a moving fader sends its latest position.
-// Knobs and the master fader do nothing yet.
+// Faders: the strip's track volume; bottom knobs (above mute): its pan, CC 64 = centre. Each once it
+// reaches the track's level (pickup). A change of that level on MPC's side lets go of the control
+// until it reaches the new level. One volume or pan command at a time, at most 10 a second: a moving
+// control sends its latest position.
+// The other knobs and the master fader do nothing yet.
 // The Midimix is found by its sequencer client's name and followed through replugs; the API is
 // followed through restarts (MPC's, or the addin's).
 
@@ -42,16 +43,25 @@
 #define LEDS            27  // notes 1-26 have an LED (strip n: mute 3n+1, solo 3n+2, arm 3n+3)
 #define ON              127
 
-static const unsigned char FADER_CC[STRIPS] = {19, 23, 27, 31, 49, 53, 57, 61};
 static const char *const KIND[] = {"mute", "solo", "arm"};  // a strip's buttons, as api_op
+
+// A strip's mixer controls: the fader sets its track's volume, the bottom knob its pan.
+enum { VOLUME, PAN, CTL_KINDS };
+static const unsigned char CTL_CC[CTL_KINDS][STRIPS] = {
+    {19, 23, 27, 31, 49, 53, 57, 61},
+    {18, 22, 26, 30, 48, 52, 56, 60},
+};
+static const char *const CTL[] = {"fader", "pan knob"};
+static const char *const LEVEL[] = {"volume", "pan"};
+static const enum api_op CTL_OP[] = {API_VOLUME, API_PAN};
 
 #define TICK_MS    20
 #define BLINK_S    0.25  // half a blink: 2 Hz, as MPC blinks its pads
 #define FLASH_S    0.08  // half a refused press's flash
 #define FLASHES    3
 #define CONFIRM_S  0.6   // an applied press outranks the watch (sampled every 100 ms) this long
-#define VOLUME_GAP 0.1   // between volume commands
-#define RELEASE_S  0.5   // after the last volume sent: MPC's level must be that one, or let go
+#define MIXER_GAP  0.1   // between volume / pan commands
+#define RELEASE_S  0.5   // after the last level sent: MPC's level must be that one, or let go
 
 int verbose;
 static double t_start;
@@ -168,11 +178,11 @@ static int note_of(int t, int kind) {
     return t >= bank * STRIPS && t < (bank + 1) * STRIPS ? 3 * (t - bank * STRIPS) + 1 + kind : 0;
 }
 
-static void faders_release_all(void);
+static void ctls_release_all(void);
 
 static void set_bank(int b, const char *why) {
     bank = b;
-    faders_release_all();  // their tracks changed
+    ctls_release_all();  // their tracks changed
     say("bank %d: tracks %d-%d%s", bank + 1, bank * STRIPS + 1, bank * STRIPS + STRIPS, why);
 }
 
@@ -255,97 +265,109 @@ static void presses_tick(double t) {
     }
 }
 
-// --- faders ---
+// --- faders and pan knobs ---
 
-static struct fader {
+static struct ctl {
     int cc;                  // its last position 0-127, -1 not known yet
-    int caught;              // it sets its track's volume
+    int caught;              // it sets its track's level
     char track[API_ID_LEN];  // the track it caught
-    double want;             // a position to send, -1 none
-    double sent, sent_at;    // the last volume sent (or found when catching)
-} faders[STRIPS];
+    double want;             // a level to send, -1 none
+    double sent, sent_at;    // the last level sent (or found when catching)
+} ctls[CTL_KINDS][STRIPS];
 
-static int volume_id, volume_strip, volume_last;  // the volume command out, if any
-static double volume_next;
+static int mixer_id, mixer_kind, mixer_strip, mixer_last;  // the volume / pan command out, if any
+static double mixer_next;
 
-static void release(int n, const char *why) {
-    struct fader *f = &faders[n];
-    if (f->caught && why) say("fader %d lets go: %s", n + 1, why);
-    f->caught = 0;
-    f->want = -1;
+static double level_of(const struct api_track *tr, int kind) { return kind == VOLUME ? tr->volume : tr->pan; }
+
+// A level on the control's 0-127 scale, and back. Volume: CC / 127. Pan: CC / 128, so that CC 64 is
+// the centre (0.5); 127 is hard right (1).
+static double position(int kind, double lv) { return kind == VOLUME ? lv * 127 : fmin(lv * 128, 127); }
+static double level(int kind, int cc) { return kind == VOLUME ? cc / 127.0 : cc == 127 ? 1 : cc / 128.0; }
+
+static void release(int kind, int n, const char *why) {
+    struct ctl *c = &ctls[kind][n];
+    if (c->caught && why) say("%s %d lets go: %s", CTL[kind], n + 1, why);
+    c->caught = 0;
+    c->want = -1;
 }
 
-static void faders_release_all(void) {
-    for (int n = 0; n < STRIPS; n++) release(n, NULL);
+static void ctls_release_all(void) {
+    for (int kind = 0; kind < CTL_KINDS; kind++)
+        for (int n = 0; n < STRIPS; n++) release(kind, n, NULL);
 }
 
-static void fader_move(int n, int v) {
-    struct fader *f = &faders[n];
-    int prev = f->cc, t = bank * STRIPS + n;
-    f->cc = v;
+static void ctl_move(int kind, int n, int v) {
+    struct ctl *c = &ctls[kind][n];
+    int prev = c->cc, t = bank * STRIPS + n;
+    c->cc = v;
     if (!api.live || t >= api.n) return;
     const struct api_track *tr = &api.t[t];
-    if (!f->caught) {
-        if (tr->volume < 0 || !tr->mixer_gen[0]) return;
+    if (!c->caught) {
+        double lv = level_of(tr, kind);
+        if (lv < 0 || !tr->mixer_gen[0]) return;
         // Pickup: within a step of MPC's level, or passing it since the last message.
-        double at = tr->volume * 127;
+        double at = position(kind, lv);
         if (fabs(v - at) > 1 && !(prev >= 0 && (prev - at) * (v - at) < 0)) return;
-        f->caught = 1;
-        snprintf(f->track, sizeof f->track, "%s", tr->id);
-        f->sent = tr->volume;
-        f->sent_at = now();
-        say("fader %d picks up track %d (%s) at %.0f", n + 1, t + 1, tr->name, at);
+        c->caught = 1;
+        snprintf(c->track, sizeof c->track, "%s", tr->id);
+        c->sent = lv;
+        c->sent_at = now();
+        say("%s %d picks up track %d (%s) at %.0f", CTL[kind], n + 1, t + 1, tr->name, at);
     }
-    f->want = v / 127.0;
+    c->want = level(kind, v);
 }
 
-static void faders_tick(double t) {
-    for (int n = 0; n < STRIPS; n++) {
-        struct fader *f = &faders[n];
-        int k = bank * STRIPS + n;
-        if (!f->caught) continue;
-        if (!api.live || k >= api.n || strcmp(api.t[k].id, f->track)) {
-            release(n, api.live ? "its track is gone" : "no current state from MPC");
-            continue;
+static void ctls_tick(double t) {
+    for (int kind = 0; kind < CTL_KINDS; kind++)
+        for (int n = 0; n < STRIPS; n++) {
+            struct ctl *c = &ctls[kind][n];
+            int k = bank * STRIPS + n;
+            if (!c->caught) continue;
+            if (!api.live || k >= api.n || strcmp(api.t[k].id, c->track)) {
+                release(kind, n, api.live ? "its track is gone" : "no current state from MPC");
+                continue;
+            }
+            if (c->want < 0 && !(mixer_id && mixer_kind == kind && mixer_strip == n) && t - c->sent_at > RELEASE_S &&
+                fabs(position(kind, level_of(&api.t[k], kind)) - position(kind, c->sent)) > 1.5)
+                release(kind, n, kind == VOLUME ? "the volume changed on MPC" : "the pan changed on MPC");
         }
-        if (f->want < 0 && !(volume_id && volume_strip == n) && t - f->sent_at > RELEASE_S &&
-            fabs(api.t[k].volume - f->sent) > 1.5 / 127)
-            release(n, "the volume changed on MPC");
-    }
-    if (volume_id || t < volume_next) return;
-    for (int i = 1; i <= STRIPS; i++) {  // round robin, from the strip after the last one sent
-        int n = (volume_last + i) % STRIPS;
-        struct fader *f = &faders[n];
-        if (!f->caught || f->want < 0) continue;
-        int id = api_send(API_VOLUME, bank * STRIPS + n, f->want, -1);
+    if (mixer_id || t < mixer_next) return;
+    for (int i = 1; i <= CTL_KINDS * STRIPS; i++) {  // round robin, from the control after the last one sent
+        int j = (mixer_last + i) % (CTL_KINDS * STRIPS), kind = j / STRIPS, n = j % STRIPS;
+        struct ctl *c = &ctls[kind][n];
+        if (!c->caught || c->want < 0) continue;
+        int id = api_send(CTL_OP[kind], bank * STRIPS + n, c->want, -1);
         if (id < 0) {
-            release(n, "can't send");
+            release(kind, n, "can't send");
             continue;
         }
-        volume_id = id;
-        volume_strip = volume_last = n;
-        f->sent = f->want;
-        f->sent_at = t;
-        f->want = -1;
-        volume_next = t + VOLUME_GAP;
+        mixer_id = id;
+        mixer_kind = kind;
+        mixer_strip = n;
+        mixer_last = j;
+        c->sent = c->want;
+        c->sent_at = t;
+        c->want = -1;
+        mixer_next = t + MIXER_GAP;
         return;
     }
 }
 
-static void volume_result(const struct api_result *r) {
-    if (r->id != volume_id) return;
-    volume_id = 0;
-    if (verbose) say("volume track %d: %s (%d ms)", track_index(r->track) + 1, r->status, r->total_ms);
+static void mixer_result(const struct api_result *r) {
+    if (r->id != mixer_id) return;
+    mixer_id = 0;
+    if (verbose) say("%s track %d: %s (%d ms)", LEVEL[mixer_kind], track_index(r->track) + 1, r->status, r->total_ms);
     // unknown: the level may be back under MPC's automation already; the watch will tell. A refusal
-    // releases the fader only if it still holds that track (not after a bank change, say).
-    const struct fader *f = &faders[volume_strip];
-    if (strcmp(r->status, "applied") && strcmp(r->status, "unknown") && strcmp(r->status, "accepted") && f->caught &&
-        !strcmp(f->track, r->track))
-        release(volume_strip, r->error ? r->error : r->status);
+    // releases the control only if it still holds that track (not after a bank change, say).
+    const struct ctl *c = &ctls[mixer_kind][mixer_strip];
+    if (strcmp(r->status, "applied") && strcmp(r->status, "unknown") && strcmp(r->status, "accepted") && c->caught &&
+        !strcmp(c->track, r->track))
+        release(mixer_kind, mixer_strip, r->error ? r->error : r->status);
 }
 
 static void on_result(const struct api_result *r) {
-    if (r->op == API_VOLUME) volume_result(r);
+    if (r->op == API_VOLUME || r->op == API_PAN) mixer_result(r);
     else press_result(r);
 }
 
@@ -399,8 +421,9 @@ static void handle(const struct snd_seq_event *ev) {
         int value = ev->data.control.value;
         if (verbose) say("in cc %u = %d", param, value);
         if (ev->data.control.channel != 0 || value < 0 || value > 127) break;
-        for (int n = 0; n < STRIPS; n++)
-            if (param == FADER_CC[n]) fader_move(n, value);
+        for (int kind = 0; kind < CTL_KINDS; kind++)
+            for (int n = 0; n < STRIPS; n++)
+                if (param == CTL_CC[kind][n]) ctl_move(kind, n, value);
         break;
     }
     case SNDRV_SEQ_EVENT_PORT_START:
@@ -447,7 +470,8 @@ int main(int argc, char **argv) {
     struct sigaction sa = {.sa_handler = on_signal};
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
-    for (int n = 0; n < STRIPS; n++) faders[n] = (struct fader){.cc = -1, .want = -1};
+    for (int kind = 0; kind < CTL_KINDS; kind++)
+        for (int n = 0; n < STRIPS; n++) ctls[kind][n] = (struct ctl){.cc = -1, .want = -1};
 
     seq_open();
     api_init(on_result);
@@ -461,7 +485,7 @@ int main(int argc, char **argv) {
         presses_tick(t);
         if (bank > 0 && api.live && bank * STRIPS >= api.n)
             set_bank(api.n ? (api.n - 1) / STRIPS : 0, " (tracks deleted)");
-        faders_tick(t);
+        ctls_tick(t);
         if (t >= next_blink) {
             blink_on = !blink_on;
             next_blink += BLINK_S;
