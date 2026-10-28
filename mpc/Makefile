@@ -10,12 +10,12 @@ TOOLS = seqtool mpcstate midimixd
 
 # Sources besides <tool>/<tool>.c
 mpcstate_SRC = mpcread/mpcread.c
-midimixd_SRC = mpcread/mpcread.c
+midimixd_SRC = midimixd/api.c midimixd/json.c
 
 arm: $(TOOLS:%=build/arm/%)
 
 .SECONDEXPANSION:
-build/arm/%: $$*/$$*.c $$($$*_SRC) mpcread/mpcread.h
+build/arm/%: $$*/$$*.c $$($$*_SRC) $(wildcard */*.h)
 	@mkdir -p $(@D)
 	$(ZIG) cc -target arm-linux-musleabihf -mcpu=cortex_a17 -static $(CFLAGS) -o $@ $(filter %.c,$^)
 

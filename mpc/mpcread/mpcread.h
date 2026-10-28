@@ -2,7 +2,8 @@
 // Read-only: process_vm_readv as root, no ptrace stop, no writes, no calls into MPC. Method and
 // offsets come from mpc-tests (../mpc/findings/live-state.md) and only fit MPC 3.9.1.2: the
 // executable's GNU build ID is checked before any offset is used. Results in CLAUDE.md ("Reading
-// MPC's state"). Used by mpcstate (the command-line reader) and midimixd.
+// MPC's state from memory"). Used by mpcstate (the command-line reader); midimixd used it until it
+// moved onto mpc-tests' native API.
 
 #ifndef MPCREAD_H
 #define MPCREAD_H

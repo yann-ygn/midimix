@@ -1,19 +1,26 @@
-// midimixd: the Akai Midimix as a control surface for MPC 3.9.1.2 on the Key 37. Milestone 2: the
-// LEDs. 30 times a second it reads every track's mute / solo / rec arm from MPC's memory (mpcread:
-// read-only) and lights the Midimix to match; bank left / right page its 8 strips through MPC's
-// tracks. The other buttons, the knobs and the faders do nothing yet: orders to MPC come next.
+// midimixd: the Akai Midimix as a control surface for MPC 3.9.1.2 on the Key 37, through mpc-tests'
+// native API (api.c). The API's watch says what every track's mute / solo / rec arm / volume is; the
+// Midimix's LEDs follow it, and its buttons and faders become API commands.
 //
-//   midimixd [-v]        -v: also log every LED message and what the Midimix sends
+//   midimixd [-v]        -v: also log every LED message, what the Midimix sends and the API traffic
 //
-// LEDs: mute steady = muted, blinking = silenced by another track's solo; solo = soloed (the
-// Midimix shows the solo LEDs on the mute row while SOLO is held, by itself); rec arm = armed;
-// bank left / right = there are tracks that way. All off while MPC can't be read, and on exit.
-// The Midimix is found by its sequencer client's name and followed through replugs; MPC is
-// followed through restarts.
+// Strips: 8 tracks at a time in MPC's Track List order; bank left / right page by 8.
+// LEDs: mute steady = muted, blinking = silenced by another track's solo; solo = soloed (the Midimix
+// shows the solo LEDs on the mute row while SOLO is held, by itself); rec arm = armed; bank left /
+// right = there are tracks that way. All off while the API can't be read, and on exit.
+// Buttons: mute / solo / rec arm toggle the strip's track. The LED shows the press at once; a press
+// MPC refuses flashes three times.
+// Faders: the strip's track volume, once the fader reaches the track's level (pickup). A change of
+// that volume on MPC's side lets go of the fader until it reaches the new level. One volume command
+// at a time, at most 10 a second: a moving fader sends its latest position.
+// Knobs and the master fader do nothing yet.
+// The Midimix is found by its sequencer client's name and followed through replugs; the API is
+// followed through restarts (MPC's, or the addin's).
 
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -26,7 +33,7 @@
 
 #include <sound/asequencer.h>
 
-#include "../mpcread/mpcread.h"
+#include "api.h"
 
 #define MIDIMIX_NAME    "MIDI Mix"  // its ALSA sequencer client
 #define STRIPS          8
@@ -35,20 +42,27 @@
 #define LEDS            27  // notes 1-26 have an LED (strip n: mute 3n+1, solo 3n+2, arm 3n+3)
 #define ON              127
 
-#define POLL_HZ   30
-#define BLINK_S   0.25  // half a blink: 2 Hz, as MPC blinks its pads
-#define FAILS_OFF 3     // bad reads in a row before the LEDs go off
+static const unsigned char FADER_CC[STRIPS] = {19, 23, 27, 31, 49, 53, 57, 61};
+static const char *const KIND[] = {"mute", "solo", "arm"};  // a strip's buttons, as api_op
 
-static int verbose;
+#define TICK_MS    20
+#define BLINK_S    0.25  // half a blink: 2 Hz, as MPC blinks its pads
+#define FLASH_S    0.08  // half a refused press's flash
+#define FLASHES    3
+#define CONFIRM_S  0.6   // an applied press outranks the watch (sampled every 100 ms) this long
+#define VOLUME_GAP 0.1   // between volume commands
+#define RELEASE_S  0.5   // after the last volume sent: MPC's level must be that one, or let go
+
+int verbose;
 static double t_start;
 
-static double now(void) {
+double now(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
-static void say(const char *fmt, ...) {
+void say(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     printf("%9.3f ", now() - t_start);
@@ -134,86 +148,231 @@ static void send_note(int note, int velocity) {
     }
 }
 
-// --- MPC's state ---
+// --- tracks and banks ---
 
-static struct mpc_state st;  // the last good read
-static int known;            // st is current: the LEDs show it
-static int failing;          // bad reads in a row
-static const char *problem;  // last thing logged about MPC, to log each only once
-static double next_attach, scan_wait = 2;
-static pid_t scanned_pid;
 static int bank;
+
+static int track_index(const char *id) {
+    for (int t = 0; t < api.n; t++)
+        if (!strcmp(api.t[t].id, id)) return t;
+    return -1;
+}
+
+// The watch's value of a strip button's flag: 1, 0, -1 unknown.
+static int flag(const struct api_track *tr, int kind) {
+    return kind == API_MUTE ? tr->mute : kind == API_SOLO ? tr->solo : tr->arm;
+}
+
+// The note of track t's button of this kind, or 0 when the track isn't in the current bank.
+static int note_of(int t, int kind) {
+    return t >= bank * STRIPS && t < (bank + 1) * STRIPS ? 3 * (t - bank * STRIPS) + 1 + kind : 0;
+}
+
+static void faders_release_all(void);
 
 static void set_bank(int b, const char *why) {
     bank = b;
+    faders_release_all();  // their tracks changed
     say("bank %d: tracks %d-%d%s", bank + 1, bank * STRIPS + 1, bank * STRIPS + STRIPS, why);
 }
 
-static void mpc_problem(const char *why) {
-    if (why != problem) say("MPC: %s", why);
-    problem = why;
+// --- button presses ---
+
+// A press waiting for its receipt (id > 0), or applied and shown until the watch agrees (id 0).
+static struct press {
+    char track[API_ID_LEN];  // "" for a free slot
+    int kind, value, id;
+    double until;
+} presses[32];
+
+static double flash_until[LEDS];
+
+static struct press *find_press(const char *track, int kind) {
+    for (size_t i = 0; i < sizeof presses / sizeof *presses; i++)
+        if (presses[i].track[0] && presses[i].kind == kind && !strcmp(presses[i].track, track)) return &presses[i];
+    return NULL;
 }
 
-static void mpc_tick(double t) {
-    static struct mpc_state s;
-    if (!mpc_project) {
-        if (t < next_attach) return;
-        struct mpc_found f;
-        const char *why = mpc_attach(&f);
-        if (why) {
-            mpc_problem(why);
-            next_attach = t + 2;
-            if (f.where) {  // MPC is there but has no Project yet (starting): back off the scans
-                scan_wait = f.pid == scanned_pid && scan_wait < 30 ? scan_wait * 2 : 2;
-                scanned_pid = f.pid;
-                next_attach = t + scan_wait;
-            }
-            return;
-        }
-        say("MPC pid %d: Project at 0x%x (%.0f MB searched in %.0f ms)", f.pid, f.project, f.mb, f.ms);
-        scanned_pid = 0;
-        problem = NULL;
-        failing = 0;
-    }
+// What a strip button's LED shows: the press in progress, else the watch.
+static int shown(const struct api_track *tr, int kind) {
+    const struct press *p = find_press(tr->id, kind);
+    return p ? p->value : flag(tr, kind);
+}
 
-    const char *why = mpc_poll(&s);
-    if (!why) {
-        if (!known && problem) say("MPC: readable again, %d tracks", s.n);
-        st = s;
-        known = 1;
-        failing = 0;
-        problem = NULL;
-        if (bank > 0 && bank * STRIPS >= st.n) set_bank(st.n ? (st.n - 1) / STRIPS : 0, " (tracks deleted)");
+static void flash(int note) {
+    if (note > 0) flash_until[note] = now() + 2 * FLASHES * FLASH_S;
+}
+
+static void press(int note) {
+    int strip = (note - 1) / 3, kind = (note - 1) % 3, t = bank * STRIPS + strip;
+    if (!api.live || t >= api.n) return;
+    const struct api_track *tr = &api.t[t];
+    int cur = shown(tr, kind);
+    struct press *p = find_press(tr->id, kind);
+    for (size_t i = 0; !p && i < sizeof presses / sizeof *presses; i++)
+        if (!presses[i].track[0]) p = &presses[i];
+    if (cur < 0 || !p) {
+        say("%s track %d (%s): %s", KIND[kind], t + 1, tr->name, cur < 0 ? "not readable on this track" : "busy");
+        flash(note);
         return;
     }
-    if (++failing < FAILS_OFF) return;  // a torn read, or MPC in the middle of a change
-    known = 0;
-    mpc_problem(why);
-    if (!mpc_project_alive()) {  // MPC restarting, or its Project replaced: search again
-        mpc_project = 0;
-        next_attach = t;
+    // The opposite of what the LED shows, if MPC still has that when the command runs.
+    int id = api_send((enum api_op)kind, t, !cur, cur);
+    if (id < 0) {
+        flash(note);
+        return;
     }
+    snprintf(p->track, sizeof p->track, "%s", tr->id);
+    p->kind = kind;
+    p->value = !cur;
+    p->id = id;
+    say("%s track %d (%s) %s", KIND[kind], t + 1, tr->name, cur ? "off" : "on");
+}
+
+static void press_result(const struct api_result *r) {
+    struct press *p = NULL;
+    for (size_t i = 0; i < sizeof presses / sizeof *presses && !p; i++)
+        if (presses[i].track[0] && presses[i].id == r->id) p = &presses[i];
+    int t = track_index(r->track), applied = !strcmp(r->status, "applied");
+    say("%s track %d: %s%s%s (%d ms)", KIND[r->op], t + 1, r->status, r->error ? " " : "", r->error ? r->error : "",
+        r->total_ms);
+    if (applied && p) {
+        p->id = 0;
+        p->until = now() + CONFIRM_S;
+        return;
+    }
+    if (p) p->track[0] = '\0';  // the watch has the last word
+    // unknown or accepted: it may have happened, the watch will tell; otherwise MPC said no.
+    if (strcmp(r->status, "unknown") && strcmp(r->status, "accepted") && t >= 0) flash(note_of(t, r->op));
+}
+
+static void presses_tick(double t) {
+    for (size_t i = 0; i < sizeof presses / sizeof *presses; i++) {
+        struct press *p = &presses[i];
+        if (!p->track[0] || p->id) continue;
+        int k = track_index(p->track);
+        if (k < 0 || t > p->until || flag(&api.t[k], p->kind) == p->value) p->track[0] = '\0';
+    }
+}
+
+// --- faders ---
+
+static struct fader {
+    int cc;                  // its last position 0-127, -1 not known yet
+    int caught;              // it sets its track's volume
+    char track[API_ID_LEN];  // the track it caught
+    double want;             // a position to send, -1 none
+    double sent, sent_at;    // the last volume sent (or found when catching)
+} faders[STRIPS];
+
+static int volume_id, volume_strip, volume_last;  // the volume command out, if any
+static double volume_next;
+
+static void release(int n, const char *why) {
+    struct fader *f = &faders[n];
+    if (f->caught && why) say("fader %d lets go: %s", n + 1, why);
+    f->caught = 0;
+    f->want = -1;
+}
+
+static void faders_release_all(void) {
+    for (int n = 0; n < STRIPS; n++) release(n, NULL);
+}
+
+static void fader_move(int n, int v) {
+    struct fader *f = &faders[n];
+    int prev = f->cc, t = bank * STRIPS + n;
+    f->cc = v;
+    if (!api.live || t >= api.n) return;
+    const struct api_track *tr = &api.t[t];
+    if (!f->caught) {
+        if (tr->volume < 0 || !tr->mixer_gen[0]) return;
+        // Pickup: within a step of MPC's level, or passing it since the last message.
+        double at = tr->volume * 127;
+        if (fabs(v - at) > 1 && !(prev >= 0 && (prev - at) * (v - at) < 0)) return;
+        f->caught = 1;
+        snprintf(f->track, sizeof f->track, "%s", tr->id);
+        f->sent = tr->volume;
+        f->sent_at = now();
+        say("fader %d picks up track %d (%s) at %.0f", n + 1, t + 1, tr->name, at);
+    }
+    f->want = v / 127.0;
+}
+
+static void faders_tick(double t) {
+    for (int n = 0; n < STRIPS; n++) {
+        struct fader *f = &faders[n];
+        int k = bank * STRIPS + n;
+        if (!f->caught) continue;
+        if (!api.live || k >= api.n || strcmp(api.t[k].id, f->track)) {
+            release(n, api.live ? "its track is gone" : "no current state from MPC");
+            continue;
+        }
+        if (f->want < 0 && !(volume_id && volume_strip == n) && t - f->sent_at > RELEASE_S &&
+            fabs(api.t[k].volume - f->sent) > 1.5 / 127)
+            release(n, "the volume changed on MPC");
+    }
+    if (volume_id || t < volume_next) return;
+    for (int i = 1; i <= STRIPS; i++) {  // round robin, from the strip after the last one sent
+        int n = (volume_last + i) % STRIPS;
+        struct fader *f = &faders[n];
+        if (!f->caught || f->want < 0) continue;
+        int id = api_send(API_VOLUME, bank * STRIPS + n, f->want, -1);
+        if (id < 0) {
+            release(n, "can't send");
+            continue;
+        }
+        volume_id = id;
+        volume_strip = volume_last = n;
+        f->sent = f->want;
+        f->sent_at = t;
+        f->want = -1;
+        volume_next = t + VOLUME_GAP;
+        return;
+    }
+}
+
+static void volume_result(const struct api_result *r) {
+    if (r->id != volume_id) return;
+    volume_id = 0;
+    if (verbose) say("volume track %d: %s (%d ms)", track_index(r->track) + 1, r->status, r->total_ms);
+    // unknown: the level may be back under MPC's automation already; the watch will tell. A refusal
+    // releases the fader only if it still holds that track (not after a bank change, say).
+    const struct fader *f = &faders[volume_strip];
+    if (strcmp(r->status, "applied") && strcmp(r->status, "unknown") && strcmp(r->status, "accepted") && f->caught &&
+        !strcmp(f->track, r->track))
+        release(volume_strip, r->error ? r->error : r->status);
+}
+
+static void on_result(const struct api_result *r) {
+    if (r->op == API_VOLUME) volume_result(r);
+    else press_result(r);
 }
 
 // --- the LEDs ---
 
 static int blink_on;
 
-static void leds_flush(void) {
+static void leds_flush(double t) {
     unsigned char want[LEDS] = {0};
     if (!midimix_up) return;
-    if (known) {
+    if (api.live) {
         for (int n = 0; n < STRIPS; n++) {
-            int t = bank * STRIPS + n;
-            if (t >= st.n) break;
-            const struct mpc_track *tr = &st.t[t];
-            want[3 * n + 1] = tr->mute || (tr->silenced && blink_on) ? ON : 0;
-            want[3 * n + 2] = tr->solo ? ON : 0;
-            want[3 * n + 3] = tr->arm ? ON : 0;
+            int k = bank * STRIPS + n;
+            if (k >= api.n) break;
+            const struct api_track *tr = &api.t[k];
+            const struct press *pm = find_press(tr->id, API_MUTE);
+            int mute = shown(tr, API_MUTE) == 1;
+            int silenced = !pm && !mute && tr->silenced == 1;  // by another track's solo
+            want[3 * n + 1] = mute || (silenced && blink_on) ? ON : 0;
+            want[3 * n + 2] = shown(tr, API_SOLO) == 1 ? ON : 0;
+            want[3 * n + 3] = shown(tr, API_ARM) == 1 ? ON : 0;
         }
         want[NOTE_BANK_LEFT] = bank > 0 ? ON : 0;
-        want[NOTE_BANK_RIGHT] = (bank + 1) * STRIPS < st.n ? ON : 0;
+        want[NOTE_BANK_RIGHT] = (bank + 1) * STRIPS < api.n ? ON : 0;
     }
+    for (int note = 1; note < LEDS; note++)
+        if (flash_until[note] > t) want[note] = (int)((flash_until[note] - t) / FLASH_S) % 2 ? ON : 0;
     for (int note = 1; note < LEDS && midimix_up; note++) {
         if (sent[note] == want[note]) continue;
         send_note(note, want[note]);
@@ -222,16 +381,28 @@ static void leds_flush(void) {
     }
 }
 
-// --- what arrives: the Midimix's buttons, clients coming and going ---
+// --- what arrives: the Midimix's buttons and faders, clients coming and going ---
 
 static void handle(const struct snd_seq_event *ev) {
     switch (ev->type) {
-    case SNDRV_SEQ_EVENT_NOTEON:
-        if (verbose) say("in note %d vel %d", ev->data.note.note, ev->data.note.velocity);
+    case SNDRV_SEQ_EVENT_NOTEON: {
+        int note = ev->data.note.note;
+        if (verbose) say("in note %d vel %d", note, ev->data.note.velocity);
         if (!ev->data.note.velocity) break;
-        if (ev->data.note.note == NOTE_BANK_LEFT && bank > 0) set_bank(bank - 1, "");
-        if (ev->data.note.note == NOTE_BANK_RIGHT && known && (bank + 1) * STRIPS < st.n) set_bank(bank + 1, "");
+        if (note >= 1 && note <= 3 * STRIPS) press(note);
+        if (note == NOTE_BANK_LEFT && bank > 0) set_bank(bank - 1, "");
+        if (note == NOTE_BANK_RIGHT && api.live && (bank + 1) * STRIPS < api.n) set_bank(bank + 1, "");
         break;
+    }
+    case SNDRV_SEQ_EVENT_CONTROLLER: {
+        unsigned param = ev->data.control.param;
+        int value = ev->data.control.value;
+        if (verbose) say("in cc %u = %d", param, value);
+        if (ev->data.control.channel != 0 || value < 0 || value > 127) break;
+        for (int n = 0; n < STRIPS; n++)
+            if (param == FADER_CC[n]) fader_move(n, value);
+        break;
+    }
     case SNDRV_SEQ_EVENT_PORT_START:
         if (!midimix_up) find_midimix();
         break;
@@ -242,9 +413,6 @@ static void handle(const struct snd_seq_event *ev) {
             say("Midimix gone");
         }
         break;
-    default:
-        if (verbose && ev->type == SNDRV_SEQ_EVENT_CONTROLLER)
-            say("in cc %u = %d", ev->data.control.param, ev->data.control.value);
     }
 }
 
@@ -279,33 +447,40 @@ int main(int argc, char **argv) {
     struct sigaction sa = {.sa_handler = on_signal};
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
+    for (int n = 0; n < STRIPS; n++) faders[n] = (struct fader){.cc = -1, .want = -1};
 
     seq_open();
+    api_init(on_result);
     say("midimixd: seq client %d:%d", my_client, my_port);
     if (!find_midimix()) say("waiting for the Midimix (\"%s\")", MIDIMIX_NAME);
 
-    double next_poll = now(), next_blink = now();
+    double next_blink = now();
     while (!stop) {
         double t = now();
-        if (t >= next_poll) {
-            mpc_tick(t);
-            next_poll += 1.0 / POLL_HZ;
-            if (next_poll < now()) next_poll = now() + 1.0 / POLL_HZ;  // after a long scan
-        }
+        api_tick(t);
+        presses_tick(t);
+        if (bank > 0 && api.live && bank * STRIPS >= api.n)
+            set_bank(api.n ? (api.n - 1) / STRIPS : 0, " (tracks deleted)");
+        faders_tick(t);
         if (t >= next_blink) {
             blink_on = !blink_on;
             next_blink += BLINK_S;
             if (next_blink < t) next_blink = t + BLINK_S;
         }
-        leds_flush();
-        double wake = next_poll < next_blink ? next_poll : next_blink;
-        int ms = (int)((wake - now()) * 1000) + 1;
-        struct pollfd pfd = {.fd = seq_fd, .events = POLLIN};
-        if (poll(&pfd, 1, ms > 0 ? ms : 0) > 0) read_events();
+        leds_flush(t);
+
+        struct pollfd fds[1 + API_MAX_FDS] = {{.fd = seq_fd, .events = POLLIN}};
+        int n = 1 + api_pollfds(fds + 1, API_MAX_FDS);
+        if (poll(fds, (nfds_t)n, TICK_MS) > 0) {
+            if (fds[0].revents) read_events();
+            api_events(fds + 1, n - 1);
+        }
     }
 
-    known = 0;  // leave the Midimix dark rather than showing a state that will go stale
-    leds_flush();
+    api.live = 0;  // leave the Midimix dark rather than showing a state that will go stale
+    memset(flash_until, 0, sizeof flash_until);
+    leds_flush(now());
+    api_close();
     say("stopped");
     return 0;
 }

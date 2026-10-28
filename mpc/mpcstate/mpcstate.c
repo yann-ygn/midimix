@@ -1,5 +1,6 @@
 // mpcstate: print every track's mute / solo / rec arm / volume, read from the running MPC app's
-// memory (mpcread: read-only, MPC 3.9.1.2 only). For checking what midimixd will see.
+// memory (mpcread: read-only, MPC 3.9.1.2 only). A check independent of the native API, which is
+// what midimixd sees.
 //
 //   mpcstate show                          the selected sequence and track, every user track
 //   mpcstate watch [secs] [hz]             poll (30 Hz by default), print what changes, then timings
