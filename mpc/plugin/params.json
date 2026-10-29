@@ -1,0 +1,296 @@
+{
+ "name": "Midimix Editor",
+ "params": [
+  {
+   "key": "status",
+   "name": "Status",
+   "display": "string"
+  },
+  {
+   "key": "hint",
+   "name": "Hint",
+   "display": "string"
+  },
+  {
+   "key": "edit_title",
+   "name": "Row",
+   "display": "string"
+  },
+  {
+   "key": "edit_help",
+   "name": "Row help",
+   "display": "string"
+  },
+  {
+   "key": "rowkind",
+   "name": "Row kind",
+   "options": [
+    "LEVEL",
+    "BUTTON"
+   ]
+  },
+  {
+   "key": "edit_level",
+   "name": "Knob or fader",
+   "options": [
+    "NONE",
+    "VOLUME",
+    "PAN",
+    "SEND 1",
+    "SEND 2",
+    "SEND 3",
+    "SEND 4"
+   ]
+  },
+  {
+   "key": "edit_button",
+   "name": "Button",
+   "options": [
+    "NONE",
+    "MUTE",
+    "SOLO",
+    "REC ARM",
+    "INSERT 1",
+    "INSERT 2",
+    "INSERT 3",
+    "INSERT 4",
+    "SELECT"
+   ]
+  },
+  {
+   "key": "row_1",
+   "name": "Row 1",
+   "display": "string"
+  },
+  {
+   "key": "row_2",
+   "name": "Row 2",
+   "display": "string"
+  },
+  {
+   "key": "row_3",
+   "name": "Row 3",
+   "display": "string"
+  },
+  {
+   "key": "row_4",
+   "name": "Row 4",
+   "display": "string"
+  },
+  {
+   "key": "row_5",
+   "name": "Row 5",
+   "display": "string"
+  },
+  {
+   "key": "row_6",
+   "name": "Row 6",
+   "display": "string"
+  },
+  {
+   "key": "row_7",
+   "name": "Row 7",
+   "display": "string"
+  },
+  {
+   "key": "name_1",
+   "name": "Strip 1",
+   "display": "string"
+  },
+  {
+   "key": "name_2",
+   "name": "Strip 2",
+   "display": "string"
+  },
+  {
+   "key": "name_3",
+   "name": "Strip 3",
+   "display": "string"
+  },
+  {
+   "key": "name_4",
+   "name": "Strip 4",
+   "display": "string"
+  },
+  {
+   "key": "name_5",
+   "name": "Strip 5",
+   "display": "string"
+  },
+  {
+   "key": "name_6",
+   "name": "Strip 6",
+   "display": "string"
+  },
+  {
+   "key": "name_7",
+   "name": "Strip 7",
+   "display": "string"
+  },
+  {
+   "key": "name_8",
+   "name": "Strip 8",
+   "display": "string"
+  },
+  {
+   "key": "colour_1",
+   "name": "Colour 1",
+   "options": [
+    "NONE",
+    "GREY",
+    "RED",
+    "ORANGE",
+    "YELLOW",
+    "LIME",
+    "GREEN",
+    "MINT",
+    "CYAN",
+    "AZURE",
+    "BLUE",
+    "VIOLET",
+    "MAGENTA",
+    "PINK"
+   ]
+  },
+  {
+   "key": "colour_2",
+   "name": "Colour 2",
+   "options": [
+    "NONE",
+    "GREY",
+    "RED",
+    "ORANGE",
+    "YELLOW",
+    "LIME",
+    "GREEN",
+    "MINT",
+    "CYAN",
+    "AZURE",
+    "BLUE",
+    "VIOLET",
+    "MAGENTA",
+    "PINK"
+   ]
+  },
+  {
+   "key": "colour_3",
+   "name": "Colour 3",
+   "options": [
+    "NONE",
+    "GREY",
+    "RED",
+    "ORANGE",
+    "YELLOW",
+    "LIME",
+    "GREEN",
+    "MINT",
+    "CYAN",
+    "AZURE",
+    "BLUE",
+    "VIOLET",
+    "MAGENTA",
+    "PINK"
+   ]
+  },
+  {
+   "key": "colour_4",
+   "name": "Colour 4",
+   "options": [
+    "NONE",
+    "GREY",
+    "RED",
+    "ORANGE",
+    "YELLOW",
+    "LIME",
+    "GREEN",
+    "MINT",
+    "CYAN",
+    "AZURE",
+    "BLUE",
+    "VIOLET",
+    "MAGENTA",
+    "PINK"
+   ]
+  },
+  {
+   "key": "colour_5",
+   "name": "Colour 5",
+   "options": [
+    "NONE",
+    "GREY",
+    "RED",
+    "ORANGE",
+    "YELLOW",
+    "LIME",
+    "GREEN",
+    "MINT",
+    "CYAN",
+    "AZURE",
+    "BLUE",
+    "VIOLET",
+    "MAGENTA",
+    "PINK"
+   ]
+  },
+  {
+   "key": "colour_6",
+   "name": "Colour 6",
+   "options": [
+    "NONE",
+    "GREY",
+    "RED",
+    "ORANGE",
+    "YELLOW",
+    "LIME",
+    "GREEN",
+    "MINT",
+    "CYAN",
+    "AZURE",
+    "BLUE",
+    "VIOLET",
+    "MAGENTA",
+    "PINK"
+   ]
+  },
+  {
+   "key": "colour_7",
+   "name": "Colour 7",
+   "options": [
+    "NONE",
+    "GREY",
+    "RED",
+    "ORANGE",
+    "YELLOW",
+    "LIME",
+    "GREEN",
+    "MINT",
+    "CYAN",
+    "AZURE",
+    "BLUE",
+    "VIOLET",
+    "MAGENTA",
+    "PINK"
+   ]
+  },
+  {
+   "key": "colour_8",
+   "name": "Colour 8",
+   "options": [
+    "NONE",
+    "GREY",
+    "RED",
+    "ORANGE",
+    "YELLOW",
+    "LIME",
+    "GREEN",
+    "MINT",
+    "CYAN",
+    "AZURE",
+    "BLUE",
+    "VIOLET",
+    "MAGENTA",
+    "PINK"
+   ]
+  }
+ ]
+}

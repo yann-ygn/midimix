@@ -43,6 +43,7 @@ static struct command {
     struct conn c;
     int id;
     enum api_op op;
+    int index;
     char track[API_ID_LEN];
     double deadline;
 } cmds[MAX_CMDS];
@@ -52,7 +53,8 @@ static int last_id;
 static char rid_prefix[48];
 static struct json js;
 
-static const char *const OPS[] = {"set_mute", "set_solo", "set_record_armed", "set_volume", "set_pan"};
+static const char *const OPS[] = {"set_mute",  "set_solo",       "set_record_armed",   "set_volume",
+                                  "set_pan",   "set_send_level", "set_insert_enabled", "select_track"};
 
 static void trouble(const char *fmt, ...) {
     char msg[sizeof problem];
@@ -140,6 +142,21 @@ static int fill_track(struct api_track *t, int node) {
     t->volume = v >= 0 && v <= 1 ? (float)v : -1;
     v = json_num(&js, json_get(&js, mixer, "pan"), -1);
     t->pan = v >= 0 && v <= 1 ? (float)v : -1;
+    for (int i = 0; i < API_SENDS; i++) t->send[i] = -1;
+    for (int i = 0; i < API_INSERTS; i++) t->insert[i] = -1;
+    int sends = json_get(&js, mixer, "sends"), inserts = json_get(&js, mixer, "inserts");
+    for (int i = sends >= 0 ? js.n[sends].child : -1; i >= 0; i = js.n[i].next) {
+        int k = (int)json_num(&js, json_get(&js, i, "index"), -1);
+        v = json_num(&js, json_get(&js, i, "value"), -1);
+        if (k >= 0 && k < API_SENDS && v >= 0 && v <= 1) t->send[k] = (float)v;
+    }
+    for (int i = inserts >= 0 ? js.n[inserts].child : -1; i >= 0; i = js.n[i].next) {
+        int k = (int)json_num(&js, json_get(&js, i, "index"), -1);
+        if (k >= 0 && k < API_INSERTS && json_bool(&js, json_get(&js, i, "occupied")) == 1)
+            t->insert[k] = (signed char)json_bool(&js, json_get(&js, i, "enabled"));
+    }
+    v = json_num(&js, json_path(&js, node, "setup.colour"), -1);
+    t->colour = v >= 0 && v <= 0xffffff ? (long)v : -1;
     return 0;
 }
 
@@ -170,6 +187,7 @@ static int apply_snapshot(int st) {
         s.n++;
     }
     mute_context(&s, json_get(&js, st, "muteContext"));
+    copy(s.selected, sizeof s.selected, id_of(json_get(&js, st, "selectedTrackId")));
     s.live = 1;
     int news = !api.live || strcmp(api.instance, s.instance) || strcmp(api.project, s.project) || api.n != s.n ||
                api.mute_scope != s.mute_scope;
@@ -189,11 +207,13 @@ static int apply_change(int frame) {
     if (!api.live || !inst || strcmp(inst, api.instance) || !proj || strcmp(proj, api.project) || tracks < 0)
         return -1;
     mute_context(&api, json_get(&js, frame, "muteContext"));
+    copy(api.selected, sizeof api.selected, id_of(json_get(&js, frame, "selectedTrackId")));
     for (int i = js.n[tracks].child; i >= 0; i = js.n[i].next) {
         struct api_track t;
         if (fill_track(&t, i)) continue;
         for (int k = 0; k < api.n; k++)
             if (!strcmp(api.t[k].id, t.id)) {
+                t.colour = api.t[k].colour;
                 api.t[k] = t;
                 break;
             }
@@ -300,7 +320,7 @@ static void watch_pump(void) {
 // --- commands ---
 
 static void command_done(struct command *c, char *line, size_t len, const char *why) {
-    struct api_result r = {.id = c->id, .op = c->op, .status = "failed", .error = why, .total_ms = -1};
+    struct api_result r = {.id = c->id, .op = c->op, .index = c->index, .status = "failed", .error = why, .total_ms = -1};
     copy(r.track, sizeof r.track, c->track);
     if (line && json_parse(&js, line, len)) {
         r.error = "unreadable receipt";
@@ -335,7 +355,7 @@ static void command_pump(struct command *c) {
     }
 }
 
-int api_send(enum api_op op, int t, double value, int expected) {
+int api_send(enum api_op op, int t, int index, double value, int expected) {
     struct command *c = NULL;
     for (int i = 0; i < MAX_CMDS && !c; i++)
         if (cmds[i].c.fd < 0) c = &cmds[i];
@@ -345,8 +365,10 @@ int api_send(enum api_op op, int t, double value, int expected) {
         say("API: %d commands already waiting, not sending more", MAX_CMDS);
         return -1;
     }
-    int mixer = op == API_VOLUME || op == API_PAN;
+    int mixer = op == API_VOLUME || op == API_PAN || op == API_SEND || op == API_INSERT;
     if ((op == API_MUTE && !api.mute_scope) || (mixer && !tr->mixer_gen[0])) return -1;
+    if ((op == API_SEND && (index < 0 || index >= API_SENDS)) || (op == API_INSERT && (index < 0 || index >= API_INSERTS)))
+        return -1;
 
     char req[1024];
     int id = ++last_id;
@@ -354,10 +376,14 @@ int api_send(enum api_op op, int t, double value, int expected) {
                                   "{\"apiVersion\":\"0.1\",\"op\":\"%s\",\"requestId\":\"%s-%d\",\"target\":{\"instanceId\":"
                                   "\"%s\",\"projectId\":\"%s\",\"trackId\":\"%s\"}",
                                   OPS[op], rid_prefix, id, api.instance, api.project, tr->id);
-    if (mixer) {
+    if (mixer) len += (size_t)snprintf(req + len, sizeof req - len, ",\"mixerGeneration\":\"%s\"", tr->mixer_gen);
+    if (op == API_SEND) len += (size_t)snprintf(req + len, sizeof req - len, ",\"sendIndex\":%d", index);
+    if (op == API_INSERT) len += (size_t)snprintf(req + len, sizeof req - len, ",\"slotIndex\":%d", index);
+    if (op == API_SELECT) {
+        // the target alone
+    } else if (op == API_VOLUME || op == API_PAN || op == API_SEND) {
         value = value < 0 ? 0 : value > 1 ? 1 : value;
-        len += (size_t)snprintf(req + len, sizeof req - len, ",\"mixerGeneration\":\"%s\",\"value\":%.9g", tr->mixer_gen,
-                                value);
+        len += (size_t)snprintf(req + len, sizeof req - len, ",\"value\":%.9g", value);
     } else {
         len += (size_t)snprintf(req + len, sizeof req - len, ",\"value\":%s", value ? "true" : "false");
         if (expected >= 0)
@@ -382,6 +408,7 @@ int api_send(enum api_op op, int t, double value, int expected) {
     c->c.len = 0;
     c->id = id;
     c->op = op;
+    c->index = index;
     copy(c->track, sizeof c->track, tr->id);
     c->deadline = now() + CMD_LIMIT;
     return id;

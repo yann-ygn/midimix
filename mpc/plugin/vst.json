@@ -1,0 +1,15 @@
+{
+  "name": "Midimix Editor",
+  "vendor": "ygn",
+  "uid": "MmEd",
+  "version": 1000,
+  "so": "midimix_editor.so",
+  "params": "params.json",
+  "layout": "layout.conf",
+  "art": "html",
+  "cc": false,
+  "nrpn": false,
+  "defines": {"HAS_DISPLAY_REV": 1, "PARAM_TEXT_MAX": 64},
+  "build": {"root": ".", "sources": ["engine.c", "mmd.c", "../midimixd/map.c"], "cflags": ["-I../midimixd"],
+            "libs": ["-lm", "-lpthread"]}
+}

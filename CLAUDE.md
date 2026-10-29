@@ -9,15 +9,19 @@ MPC's screen and pads. Not a VST plugin.
 ## Status (2026-10-29)
 
 - Recon done on the Key 37 (MPC 3.9.1.2), see below.
-- mpc-tests' API is 0.15.0 on the Key 37 (2026-10-29): nothing midimixd reads or sends changed,
-  and the running service carried on through the upgrade ("MPC's native API" below).
+- mpc-tests' API is 0.16.0 on the Key 37 (2026-10-29): nothing midimixd reads or sends changed,
+  and the running service carried on through the upgrades ("MPC's native API" below). 0.16.0 names
+  a plugin track's plugin, but only for MPC-format plugins: not the editor's VST2.
 - Midimix LEDs answer note on vel 127 on the same note (checked with `seqtool`, 2026-10-22).
 - The bridge (`mpc/midimixd`, below) runs on mpc-tests' **native API**, an addin inside MPC ("MPC's
   native API" below): LEDs from its watch stream, buttons, faders and pan knobs as its commands.
   Milestone 3, checked on the Key 37 2026-10-28 with presses sent to its port; not yet tried by hand
   on the hardware. Not checked yet: a Midimix replug. Installed on the Key 37 as a systemd service
-  that starts with MPC (milestone 4, 2026-10-28, checked through a reboot). Next: milestone 5, the
-  mapping editor: an MPC plugin like torpedo's (below).
+  that starts with MPC (milestone 4, 2026-10-28, checked through a reboot).
+- Milestone 5, the mapping editor (below), started 2026-10-29: midimixd has the mapping and a control
+  socket (installed service upgraded); the plugin (`mpc/plugin`) is installed and registered on the
+  Key 37 and works there (page, touch picks the row, mapping in effect while it's loaded). Its page
+  is a first draft to iterate on.
 - The memory reader of milestones 1–2 (`mpc/mpcread`, "Reading MPC's state from memory" below) is
   now only behind `mpcstate`, a diagnostic tool.
 - MPC's hidden **Lua scripting** (below) could read and set every track's state but nothing
@@ -41,6 +45,9 @@ MPC's screen and pads. Not a VST plugin.
   `daemon-reload`. The addins' `mpc-addins-reload.service` (rootfs, wanted by `acvs`) does one at
   ~7.9 s, before MPC starts (~9.1 s). A reload doesn't queue the units it newly makes wanted, so
   midimixd is started from MPC's own unit (milestone 4, below).
+- **Global automation** (icon at the top right of Main: green "R" Read, red "W" Write, grey Off): a tap
+  toggles Read / Write, SHIFT + AUTOMATION turns it Off and back on (user, 2026-10-29). Sends and
+  inserts can only be set through the API with it Off.
 - **SOLO on the Main screen (or the MPC X's SOLO, note 77) solos the selected track, and the solo
   follows the selection**: select another track and the solo moves to it (seen 2026-10-24).
 - **New Project restarts the app** (seen twice 2026-10-24, once with no reader running): MPC exits
@@ -164,8 +171,8 @@ No memory reading, no MIDI Learn, nothing sent to MPC as MIDI.
 - **Pan:** each strip's bottom knob (the one above mute; user's choice 2026-10-28), with pickup like
   the faders: CC / 128, so that CC 64 is the centre (0.5), and CC 127 is hard right (1.0). The
   session's pans were all multiples of 1/128 (2026-10-28).
-- **Top two knobs and master fader:** nothing yet; the knobs get theirs from the editor (below).
-  Sends need automation Off (below); the master channel can't be set through the API.
+- **Top two knobs and master fader:** nothing by default; the editor (below) can give the knobs a
+  target. Sends need automation Off (below); the master channel can't be set through the API.
 - **Milestones:** 1. reader prototype (memory, done 2026-10-24; now a diagnostic). 2. seq in / out,
   bank paging, LEDs (done 2026-10-24). 3. orders to MPC, rebuilt on the native API (done 2026-10-28).
   4. systemd unit and install / uninstall (done 2026-10-28). 5. the mapping editor (below).
@@ -181,8 +188,8 @@ No memory reading, no MIDI Learn, nothing sent to MPC as MIDI.
   2 of the strip's track". So the Midimix keeps its factory map; the mapping lives in midimixd.
 - **Form:** like torpedo's MPC plugin (`../torpedo/mpc/plugin/`, see `../torpedo/CLAUDE.md`): a
   silent instrument on mpc-vst-plugins' VST2 wrapper, its page on MPC's screen (`layout.conf`, the
-  skin studio, the browser renderer), its presets in MPC's PRESET menu. Torpedo is the user's
-  code: reuse it.
+  skin studio, the browser renderer). Torpedo is the user's code: reuse it. Built as "ygn - VST -
+  Midimix Editor" (`mpc/plugin`, below); no presets of its own (the project keeps the mapping).
 - **midimixd** gets a control socket (root only, like the API's): read and replace the mapping, and
   report each control as it moves, so that touching one on the Midimix picks its row on the page.
   It also reports each strip's track (name, colour), so the page draws the strips in their tracks'
@@ -190,26 +197,30 @@ No memory reading, no MIDI Learn, nothing sent to MPC as MIDI.
   snapshots, so a colour changed on MPC shows within 5 s. Its built-in default is today's mapping.
   It must keep working without the plugin.
 - **Per project** (user's choice): the plugin keeps the mapping in its state chunk (the wrapper's
-  `state` key), so a project brings its mapping back when it loads. In a project without the plugin
-  midimixd falls back to its default: it sees the project change in the API's references
-  (`projectId`, a new one on each project load: "MPC's native API" below).
+  `state` key), so a project brings its mapping back when it loads. midimixd uses a client's mapping
+  while that client's connection is open (2026-10-29, instead of watching `projectId`: a project load
+  could otherwise race the plugin's restore): the plugin instance holds it, so when the instance
+  goes (another project, another plugin on its track) midimixd falls back to its default (both
+  checked on the Key 37 2026-10-29).
 - **Rows first** (user's choice): one target per row, the same for the 8 strips: top, middle,
   bottom knob, fader, mute, solo, rec arm. Knobs and faders take volume, pan, send 1–4
   (`set_send_level`, automation Off only) or nothing; buttons mute, solo, rec arm, insert slot 1–4
   on / off (`set_insert_enabled`, the LED showing the slot), select the strip's track
   (`select_track`, the LED lit on the selected track's strip; user's choice 2026-10-29) or nothing.
   Per-control exceptions maybe later. The master fader stays free (no API setter for it).
-- **To sort out:** the plugin's own track is a plugin track, so it is in the Track List and would
-  take a strip: midimixd should skip it (the API gives each track's `name`, `type` and, since
-  0.15.0, `setup.colour`, but not which plugin it holds, and can't rename a track: checked
-  2026-10-29). The API refuses track commands outside Main, the Channel
-  Mixer pages and Track Mute, so probably on the plugin's page too: picking a row from the Midimix
-  still works (only the plugin hears it), trying the mapping means leaving the page. `select_track`
-  is the exception: it doesn't depend on the screen (only popups other than Menu refuse it), though
-  mpc-tests only tried it on those screens; whether it works on the plugin's page is unchecked. Installing
-  into `/storage/Synths/` and the `acvs` restart a skin change needs: ask first (as in torpedo).
+- **The editor's own track** is a plugin track, so it is in the Track List and takes a strip like
+  any other, for now (user's choice 2026-10-29: skip it once the API can name it). The API can't
+  rename a track, and since 0.16.0 it names a track's plugin only for MPC-format plugins: Torpedo
+  Control, a VST2 on the same wrapper, reads `unsupported` (checked 2026-10-29, "MPC's native API"
+  below), so it can't tell the editor's track from another VST's. Needs the API to qualify the VST
+  format (mpc-tests). MPC adds new tracks at the end, so it usually takes the strip after the user's.
+- **On the plugin's page** the API refuses track commands (`NOT_READY`, checked 2026-10-29: only
+  Main, the Channel Mixer pages and Track Mute qualify): picking a row from the Midimix still works
+  (only the plugin hears it), trying the mapping means leaving the page. `select_track` works there
+  (52 ms), and MPC then leaves the page for the selected track's edit screen. A new skin needs an
+  `acvs` restart: ask first (as in torpedo); a new `.so` alone is taken at the plugin's next load.
 
-## MPC's native API (mpc-tests' `mpc-native-api` addin, 0.15.0, checked 2026-10-29)
+## MPC's native API (mpc-tests' `mpc-native-api` addin, 0.16.0, checked 2026-10-29)
 
 Source and docs in the sibling repo `../mpc` (`native-api/README.md`, `native-api/WATCH.md`,
 `findings/native-*.md`). An addin inside MPC (`/data/mpc-addins/mpc-native-api`), pinned to
@@ -244,9 +255,18 @@ Source and docs in the sibling repo `../mpc` (`native-api/README.md`, `native-ap
   tracks, output channel, bank and program, each with a setter (`set_track_colour` …) that needs the
   transport stopped. `transport` and `setup` only come in full snapshots, not in the 100 ms
   `change` frames; `selectedTrackId` comes in both. `select_track` takes the full track `target`
-  and nothing else, works while playing, and doesn't depend on the screen. Their ABI bumps are for C code inside MPC: a socket client like midimixd needs no
-  change. Still missing: which plugin a track holds; renaming, creating or removing a track
-  (`NOT_QUALIFIED`).
+  and nothing else, works while playing, and doesn't depend on the screen. Their ABI bumps are for
+  C code inside MPC: a socket client like midimixd needs no change. Still missing: renaming,
+  creating or removing a track (`NOT_QUALIFIED`).
+- **0.16.0** (installed 2026-10-29 from mpc-tests' package of `642d3d8`, clean tree; MPC
+  restarted): every track and bus has an `instrument` block, `status` / `reason` / `displayName` /
+  `productId` (`instanceId` always null). Only plugin tracks holding an **MPC-format** plugin get
+  names: Hype read `available`, `"Hype"`, `"MPC:Hype"`; the drum track and buses `not_applicable`
+  (`NOT_PLUGIN_TRACK`). Torpedo Control (mpc-vst-plugins' wrapper, shown as `VST` in MPC's plugin
+  browser) loaded on the same track read `unsupported` (`UNQUALIFIED_PLUGIN_FORMAT`), both names
+  null; the `trackId` stayed. `productId` names a product, shared by every track holding it, not an
+  instance. Like `setup`, `instrument` only comes in full snapshots (within 5 s of a change); a
+  plugin load can drop the watch (`CONTINUITY_LOST`, once over the two loads).
 - **Identity:** each project load gives a new `projectId` (mpc-tests' `findings/native-identity.md`;
   midimixd's log showed 1, 130, 264 during 0.15.0's checks). A rename or reorder keeps a track's
   `trackId`; after adding, removing or reordering a track the watch sends a full snapshot before any
@@ -320,8 +340,10 @@ log, everything restored afterwards:
   frame "?"`), then midimixd carried on by itself. They were the API's `NOT_READY` refusals ("MPC's
   native API" above): since 2026-10-29 midimixd logs the code once and retries every second (tested
   against a fake API socket on the host, then through a reboot: below).
-- It followed the API's 0.15.0 install (2026-10-29: MPC restarted, the API stopped and started)
-  without restarting itself.
+- It followed the API's 0.15.0 and 0.16.0 installs (2026-10-29: MPC restarted, the API stopped and
+  started) without restarting itself. After both restarts an untitled project (Plugin 001 with
+  Hype, a drum track) opened ~25 s after MPC started, nobody touching the screen as far as we know;
+  after a boot MPC stays on Select Demo.
 - Not checked yet: a Midimix replug, more than 8 tracks (bank 2, the API's 16-track pages), MIDI /
   CV / keygroup tracks, presses by hand on the hardware (the knobs' CCs other than 16 come from the
   Midimix's default map, not a capture).
@@ -356,6 +378,76 @@ log, everything restored afterwards:
   appeared at 10.0 s, then refused the watch (`NOT_READY`, logged once) until MPC's startup screen;
   midimixd read its state at 20.0 s (Select Demo, 0 tracks). No `sending failed` in its log.
 - Not checked yet: the LEDs going off while MPC restarts with a project open.
+
+## Milestone 5: the mapping and the editor plugin (2026-10-29)
+
+**midimixd's side** (`mpc/midimixd/map.c`, `ctl.c`; checked on the Key 37 from `/tmp`, then
+installed):
+
+- `map.h`: rows `top mid bottom fader` (level rows: `none volume pan send1`–`send4`) and `mute solo arm`
+  (buttons: `none mute solo arm insert1`–`insert4 select`); the text form, also the plugin's chunk, is
+  `top=none mid=none bottom=pan fader=volume mute=mute solo=solo arm=arm` (the default). Shared by
+  midimixd and the plugin.
+- Control socket `/run/midimixd.sock` (0600, `ctl.h`): `get`, `map <spec>` (rows not named take the
+  default's), `unmap`; every reply ends with an empty line. A connection's mapping is in effect while
+  it's open, the latest one set winning; none left, the default. `get` gives `midimix`, `api`,
+  `bank <n> <banks>`, `tracks`, `map`, `mapfrom you|other|default`, `touch <seq> <row> <strip>` (seq
+  counts touches: a moving control's CCs within 0.5 s are one, a press always a new one), `selected
+  <strip>`, and per strip `strip <n> <rrggbb|-> <type|-> <name>`. `midimixctl get | watch | map
+  <row=target>...` talks to it (`map` holds its mapping until it's stopped).
+- API: `mixer.sends[].value`, `mixer.inserts[]` (`occupied`, `enabled`), `setup.colour` (kept from the
+  last snapshot on `change` frames), `selectedTrackId` (snapshot `state` and `change` frames);
+  commands `set_send_level` (`sendIndex`), `set_insert_enabled` (`slotIndex`, `expected`),
+  `select_track` (the target only). Select LED: the press moves it off the other strips at once.
+- Checked 2026-10-29 (untitled project: Plugin 001 with Hype, a drum kit with inserts 1, 2, 4 on and 3
+  off; `midimixctl map top=send1 mid=send2 mute=select arm=insert3`, presses sent to its port): the
+  mapping took effect and went back to the default when midimixctl was stopped; select applied in
+  26 and 46 ms (selection restored); an insert press on Plugin 001 (empty slot) refused before
+  sending; send and insert commands reached the API and were refused with
+  `MIXER_AUTOMATION_UNQUALIFIED`: global automation was Read (applied once it was Off: below).
+  Touches counted as expected.
+
+**The plugin** (`mpc/plugin`, "ygn - VST - Midimix Editor", uid `MmEd`):
+
+- `engine.c` (the page, the chunk), `mmd.c` (a thread per instance: sends the mapping when it changes
+  and after a reconnect, `get` every 100 ms), torpedo's `test_host.c` (plus `setchunk`) and
+  `html_art_local`. Parameter 0 is the status line, since MPC sets parameter 0 on insert and every
+  STOP. `cc` / `nrpn` off: MIDI to its track changes nothing.
+- Page (`layout.conf`, one tab, Dracula like torpedo): status and hint lines; the 8 strips with the
+  track's colour (a `picture` per strip: RGB24 rounded to grey or one of 12 hues, `images/colour_*.svg`)
+  and name; the 7 rows (a `list`: tap one, or touch one of its controls on the Midimix); the picked
+  row's targets (`enum_h`, knob / fader ones or button ones by `when=rowkind`) and a help line.
+  Q-Link 1 / 2: those targets. A first draft, to iterate with the user.
+- Tests: `uv run --with pytest pytest tests/` (stand-in host with ASan against a fake midimixd: default
+  sent, strips and colours, editing rows, chunk save / restore, touch picks the row, an instance's
+  close drops its connection, midimixd absent then back). `make -C mpc plugin` builds the device
+  folder (glibc 2.17 symbols); offline preview: `uv run --with pillow python
+  mpc/mpc-vst-plugins/tools/studio.py preview "mpc/plugin/build/plugin/ygn - VST - Midimix
+  Editor/Plugin Skins" -o <dir>/page_%d.png`.
+- `ENGINE_TRACE` (a `-D` for a debug build) logs every parameter the host sets to `/tmp/midimix-editor.trace`.
+
+**On the Key 37** (2026-10-29, user's OK; installed service upgraded with `make -C mpc install`):
+
+- Installed as `/storage/Synths/ygn - VST - Midimix Editor/` (root-owned, copied staged then
+  renamed) and registered with the submodule's `tools/release/sync.sh -y -t /storage/Synths` (with
+  `plugin_list.awk` next to it in `/tmp`): it backs up `MPC.settings` (`/data/Settings/MPC/
+  MPC.settings.bak-sync-20261029-192919`), stops MPC, adds the entry, starts MPC. midimixd followed.
+- In MPC: track's PLUGIN field (double tap), list filtered by maker until MANUFACTURER is tapped,
+  "Midimix Editor ... VST". The page opens with the arrow beside the PLUGIN field on Main (the
+  pencil there is Track Edit).
+- HipHop demo + the editor on a 5th track: the page as in the preview, strips in the tracks' colours
+  (TheBeat ff0077, Lead ff0000, Program 001 ffd500, Audio 001 55ff00, the editor's ff00bb). Touching a
+  knob, a rec arm button (injected) picked their rows. A trace build showed MPC setting only parameter
+  0 at load (a target that changed by itself was my own tap on the page).
+- With global automation Off (SHIFT + AUTOMATION toggles Off / on, user 2026-10-29; injected on
+  `/dev/midi_inject`: notes 49 and 75 on channel 1, vel 127 then 0): send 1 of TheBeat 0 → 0.315 (CC
+  40) → 0, its insert 1 off and on again (25, 26 ms). Restored, automation back on ("Global
+  Automation: Read"). A `midimixctl map` held over the plugin's took over, and its exit gave the
+  plugin's back.
+- Replacing the editor by Hype, and loading another project (DnB demo), each dropped its mapping
+  (midimixd back to the default, within 1 s for the project load).
+- Not checked yet: a saved project bringing its mapping back (needs saving a project: ask), the
+  page's Q-Links, more than 8 tracks, presses by hand.
 
 ## Recon
 
@@ -404,6 +496,8 @@ motorised).
   MPC over SSH (`cat /dev/usbmon<bus>` into `/tmp`, killed by pid). Bus 1 = MPC surface, bus 3 =
   Midimix. Stopping it early leaves the remote `cat`s running: kill them and delete
   `/tmp/usbmon*.bin`.
+- `git submodule update --init`: `mpc/mpc-vst-plugins` (the VST2 wrapper and skin tools), pinned at the
+  same commit as torpedo's.
 - `make -C mpc deploy` builds `mpc/seqtool/seqtool.c` (static, kernel `/dev/snd/seq` ioctls, no
   libasound) and copies it to `/tmp/seqtool` on the MPC: `seqtool ports`, `seqtool send 20:0 90 01
   7f` (note / CC only, never SysEx), `seqtool dump 20:0 [secs]`. The Midimix's client number changes
@@ -417,6 +511,7 @@ motorised).
   timings; run it with `setsid … > /tmp/mpcstate-watch.log &` to watch while driving the MPC),
   `mpcstate dump project | track|program <n> | at <hex> <bytes>` (raw bytes, to diff on the host).
   Read-only, safe while MPC runs.
+- `make -C mpc deploy` also copies `midimixctl` (milestone 5, above) to `/tmp`.
 - `uv run python tools/usbmon.py decode captures/<name>.log [--all]`: one line per message,
   pad-colour bursts on one line. "host" is the MPC's side of the bus (the MPC app, or midimixd on
   bus 3). `captures/2026-10-22-map-trackmute.log` came from the text API

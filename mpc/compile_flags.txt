@@ -1,0 +1,7 @@
+-std=gnu11
+-Wall
+-Wextra
+-Imidimixd
+-Iplugin
+-Iplugin/build
+-Impc-vst-plugins/wrapper

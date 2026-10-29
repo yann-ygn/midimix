@@ -1,0 +1,22 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# dependencies = ["pillow", "playwright"]
+# ///
+"""mpc-vst-plugins' browser skin renderer (tools/html_art.py) on the system Chromium instead of Docker.
+
+gen_vst.py runs `$SHADOW_ART` as a subprocess, feeding it the renderer's commands on stdin, so `make plugin` points
+SHADOW_ART here. Playwright's own browser download isn't installed here; CHROMIUM overrides /usr/bin/chromium.
+"""
+import os
+import runpy
+import sys
+
+from playwright.sync_api import BrowserType
+
+launch = BrowserType.launch
+BrowserType.launch = lambda self, **kw: launch(self, **{"executable_path": os.environ.get("CHROMIUM", "/usr/bin/chromium"),
+                                                        "args": ["--no-sandbox"], **kw})
+art = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "mpc-vst-plugins", "tools", "html_art.py")
+sys.path.insert(0, os.path.dirname(art))
+sys.argv[0] = art
+runpy.run_path(art, run_name="__main__")

@@ -1,0 +1,3 @@
+[submodule "mpc/mpc-vst-plugins"]
+	path = mpc/mpc-vst-plugins
+	url = https://github.com/sd88me/mpc-vst-plugins.git
