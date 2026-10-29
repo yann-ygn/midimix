@@ -1,6 +1,7 @@
 // api: see api.h. One request per connection, one JSON line back; the watch connection instead
-// streams JSON lines (ack, snapshot, change, heartbeat, resync_required, terminated). A dropped
-// watch resumes from the last applied frame's cursor; resync_required starts over without one.
+// streams JSON lines (ack, snapshot, change, heartbeat, resync_required, terminated), or one error
+// line when it refuses. A dropped watch resumes from the last applied frame's cursor;
+// resync_required starts over without one.
 
 #define _GNU_SOURCE
 #include "api.h"
@@ -230,6 +231,11 @@ static void watch_frame(char *s, size_t len) {
     }
     const char *type = json_str(&js, json_get(&js, 0, "type"));
     const char *reason = json_str(&js, json_get(&js, 0, "reason"));
+    const char *error = json_str(&js, json_path(&js, 0, "error.code"));
+    if (!type && error) {  // the watch refused (NOT_READY while MPC starts): the API closes it
+        watch_lost(error, RETRY_S);
+        return;
+    }
     if (!type) type = "?";
     if (verbose && strcmp(type, "heartbeat")) {
         const char *rev = json_str(&js, json_get(&js, 0, "revision"));

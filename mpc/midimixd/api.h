@@ -1,4 +1,4 @@
-// api: midimixd's client for mpc-tests' native API (the "MPC Native API" addin in MPC, 0.13.0:
+// api: midimixd's client for mpc-tests' native API (the "MPC Native API" addin in MPC, 0.15.0:
 // ../mpc/native-api/README.md and WATCH.md) on its Unix socket. A watch subscription keeps the
 // model below current (a full snapshot, then changes); commands go out on one short connection
 // each and come back as receipts. Everything is non-blocking, driven by the program's poll loop.

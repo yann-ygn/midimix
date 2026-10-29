@@ -6,9 +6,11 @@ MPC app and the Midimix, both ways. Above all, the Midimix's mute / solo / rec-a
 (and bank) LEDs must follow what happens on the MPC, including changes made on the
 MPC's screen and pads. Not a VST plugin.
 
-## Status (2026-10-28)
+## Status (2026-10-29)
 
 - Recon done on the Key 37 (MPC 3.9.1.2), see below.
+- mpc-tests' API is 0.15.0 on the Key 37 (2026-10-29): nothing midimixd reads or sends changed,
+  and the running service carried on through the upgrade ("MPC's native API" below).
 - Midimix LEDs answer note on vel 127 on the same note (checked with `seqtool`, 2026-10-22).
 - The bridge (`mpc/midimixd`, below) runs on mpc-tests' **native API**, an addin inside MPC ("MPC's
   native API" below): LEDs from its watch stream, buttons, faders and pan knobs as its commands.
@@ -108,7 +110,8 @@ From the binary's docstrings (`strings`, offsets ~78.2–78.7 MB):
   channel; never seen in use, and nobody has published the editor's protocol.
 - The app opens its surface with raw MIDI (card 0, subdevices 0 Public / 1 Private / 2 Port A) and
   every other port through the ALSA sequencer as client 129 "MPC" (JUCE also makes client 128;
-  since midimixd starts before MPC's client exists, it takes 129 and MPC is 131 after a boot).
+  since midimixd starts before MPC's client exists, it takes 129 and MPC is 130 or 131 after a
+  boot, MPC Remote the other one).
   It subscribes to the Midimix both ways and has sent it nothing. A separate process can subscribe
   to it too (sequencer ports are shared). The Midimix's client number changes (28 on 2026-10-22,
   20 on 2026-10-24): find it by its name, "MIDI Mix" (port 0 "MIDI Mix MIDI 1").
@@ -182,24 +185,31 @@ No memory reading, no MIDI Learn, nothing sent to MPC as MIDI.
   code: reuse it.
 - **midimixd** gets a control socket (root only, like the API's): read and replace the mapping, and
   report each control as it moves, so that touching one on the Midimix picks its row on the page.
-  Its built-in default is today's mapping. It must keep working without the plugin.
+  It also reports each strip's track (name, colour), so the page draws the strips in their tracks'
+  colours (`setup.colour`, RGB24; user's choice 2026-10-29). Colours only come in the API's full
+  snapshots, so a colour changed on MPC shows within 5 s. Its built-in default is today's mapping.
+  It must keep working without the plugin.
 - **Per project** (user's choice): the plugin keeps the mapping in its state chunk (the wrapper's
   `state` key), so a project brings its mapping back when it loads. In a project without the plugin
   midimixd falls back to its default: it sees the project change in the API's references
-  (`projectId`; that it changes on a project load is unchecked).
+  (`projectId`, a new one on each project load: "MPC's native API" below).
 - **Rows first** (user's choice): one target per row, the same for the 8 strips: top, middle,
   bottom knob, fader, mute, solo, rec arm. Knobs and faders take volume, pan, send 1–4
   (`set_send_level`, automation Off only) or nothing; buttons mute, solo, rec arm, insert slot 1–4
-  on / off (`set_insert_enabled`, the LED showing the slot) or nothing. Per-control exceptions
-  maybe later. The master fader stays free (no API setter for it).
+  on / off (`set_insert_enabled`, the LED showing the slot), select the strip's track
+  (`select_track`, the LED lit on the selected track's strip; user's choice 2026-10-29) or nothing.
+  Per-control exceptions maybe later. The master fader stays free (no API setter for it).
 - **To sort out:** the plugin's own track is a plugin track, so it is in the Track List and would
-  take a strip: midimixd should skip it (the API gives each track's `name` and `type`; whether it
-  says which plugin a track holds is unchecked). The API refuses commands outside Main, the Channel
+  take a strip: midimixd should skip it (the API gives each track's `name`, `type` and, since
+  0.15.0, `setup.colour`, but not which plugin it holds, and can't rename a track: checked
+  2026-10-29). The API refuses track commands outside Main, the Channel
   Mixer pages and Track Mute, so probably on the plugin's page too: picking a row from the Midimix
-  still works (only the plugin hears it), trying the mapping means leaving the page. Installing
+  still works (only the plugin hears it), trying the mapping means leaving the page. `select_track`
+  is the exception: it doesn't depend on the screen (only popups other than Menu refuse it), though
+  mpc-tests only tried it on those screens; whether it works on the plugin's page is unchecked. Installing
   into `/storage/Synths/` and the `acvs` restart a skin change needs: ask first (as in torpedo).
 
-## MPC's native API (mpc-tests' `mpc-native-api` addin, 0.13.0, checked 2026-10-28)
+## MPC's native API (mpc-tests' `mpc-native-api` addin, 0.15.0, checked 2026-10-29)
 
 Source and docs in the sibling repo `../mpc` (`native-api/README.md`, `native-api/WATCH.md`,
 `findings/native-*.md`). An addin inside MPC (`/data/mpc-addins/mpc-native-api`), pinned to
@@ -227,6 +237,23 @@ Source and docs in the sibling repo `../mpc` (`native-api/README.md`, `native-ap
   Bass in the user's session).
   Receipts in 25–42 ms (2026-10-28). A command costs MPC's UI thread about 13–50 ms (mpc-tests'
   measurements): hence the fader throttle.
+- **0.14.0 and 0.15.0** (installed 2026-10-29, from 0.13.0): commands `play`, `stop`, `play_start`,
+  `locate`, `select_track`, `select_sequence`, `set_sequence_bpm`. Full states (snapshots,
+  `get_state`) gain `transport` (`playing`, `recording`, `pulse`, sequence and master BPM) and a
+  `setup` block per track: `colour` (RGB24), `transposeSemitones`, `velocityScale` and, on MIDI
+  tracks, output channel, bank and program, each with a setter (`set_track_colour` …) that needs the
+  transport stopped. `transport` and `setup` only come in full snapshots, not in the 100 ms
+  `change` frames; `selectedTrackId` comes in both. `select_track` takes the full track `target`
+  and nothing else, works while playing, and doesn't depend on the screen. Their ABI bumps are for C code inside MPC: a socket client like midimixd needs no
+  change. Still missing: which plugin a track holds; renaming, creating or removing a track
+  (`NOT_QUALIFIED`).
+- **Identity:** each project load gives a new `projectId` (mpc-tests' `findings/native-identity.md`;
+  midimixd's log showed 1, 130, 264 during 0.15.0's checks). A rename or reorder keeps a track's
+  `trackId`; after adding, removing or reordering a track the watch sends a full snapshot before any
+  `change`. Those changes and project loads drop the watch with `resync_required`
+  (`CONTINUITY_LOST`); midimixd starts over at once.
+- While MPC starts, the watch is refused with an error line (`{"apiVersion":"0.1","error":{"code":
+  "NOT_READY",…}}`, no `type`), and the API closes the connection.
 
 ## Reading MPC's state from memory (`mpc/mpcread`, checked on the Key 37 2026-10-24)
 
@@ -253,7 +280,8 @@ from the load address (0x400000).
   Project stayed at the same address through a project load; after a restart the watcher finds
   the new pid's Project about 4 s after MPC starts (the heap scan only finds it once the startup
   screen is up). The Project was always in `[heap]` (207–249 MB, scanned in 0.3–0.4 s).
-  Reordering tracks: no UI for it found in 3.9 (the Arrange track menu has none).
+  Reordering tracks: no UI for it found in 3.9 (the Arrange track menu has none), though mpc-tests
+  reordered tracks in its API tests (how isn't written down).
 - **Cost:** a full poll of 10 tracks takes ~100–120 µs (p99 < 0.5 ms). At 30 Hz the reader uses
   0.4% of a core, at 200 Hz 2.5%. During playback of the HipHop demo MPC used 45–46% of a core
   with or without 30 Hz polling, 48% at 200 Hz. MPC logged nothing about audio, but it may not
@@ -289,14 +317,18 @@ log, everything restored afterwards:
   (10 a second in all) and both reached their last position. Pans and volumes restored exactly.
 - It followed MPC's restart for the API's 0.13.0 install (2026-10-28, from its log: LEDs not looked
   at). During MPC's startup the API sent ~30 watch lines without a `type` (logged as `unknown watch
-  frame "?"`, not captured), then midimixd carried on by itself.
+  frame "?"`), then midimixd carried on by itself. They were the API's `NOT_READY` refusals ("MPC's
+  native API" above): since 2026-10-29 midimixd logs the code once and retries every second (tested
+  against a fake API socket on the host, then through a reboot: below).
+- It followed the API's 0.15.0 install (2026-10-29: MPC restarted, the API stopped and started)
+  without restarting itself.
 - Not checked yet: a Midimix replug, more than 8 tracks (bank 2, the API's 16-track pages), MIDI /
   CV / keygroup tracks, presses by hand on the hardware (the knobs' CCs other than 16 come from the
   Midimix's default map, not a capture).
 - Milestone 2 (2026-10-24, memory reader) was checked with a usbmon capture of bus 3: every LED
   message reaches the Midimix. Checked again through the service (2026-10-28, below).
 
-## midimixd as a service (milestone 4, installed on the Key 37 2026-10-28)
+## midimixd as a service (milestone 4, installed on the Key 37 2026-10-28, upgraded 2026-10-29)
 
 - `make -C mpc install` copies `midimixd/install.sh` and its files to `/tmp/midimixd-install` on the
   MPC and runs it: `/data/midimixd/midimixd` and `uninstall.sh`, `/etc/systemd/system/midimixd.service`
@@ -319,8 +351,11 @@ log, everything restored afterwards:
   across `systemctl stop` / `start`: the two lit LEDs (arm 1, 2) went off on stop; on start all 26
   off, then those two lit 36 ms later. During MPC's startup the API sent 47 watch lines without a
   `type`.
-- Not checked yet: the LEDs going off while MPC restarts with a project open, a reboot with the
-  subscription fix.
+- A reboot with the subscription fix and API 0.15.0 (2026-10-29, user's OK, empty project):
+  midimixd started at 9.8 s with MPC and subscribed to the Midimix both ways, the API's socket
+  appeared at 10.0 s, then refused the watch (`NOT_READY`, logged once) until MPC's startup screen;
+  midimixd read its state at 20.0 s (Select Demo, 0 tracks). No `sending failed` in its log.
+- Not checked yet: the LEDs going off while MPC restarts with a project open.
 
 ## Recon
 
@@ -361,7 +396,7 @@ motorised).
 - Address: `mpc-key-37.lan.arpa` (static DHCP lease with a DNS entry, 192.168.138.100), so
   `ssh root@mpc-key-37.lan.arpa`. Not always powered on: if it doesn't answer, ask.
 - The MPC MCP (the `remote` addin) is available in Claude sessions: screenshots, touches,
-  hardware buttons, MIDI into MPC through seq client 130 "MPC Remote".
+  hardware buttons, MIDI into MPC through seq client "MPC Remote" (130 or 131, by boot).
 
 ## Tools
 

@@ -40,7 +40,9 @@
 #include "api.h"
 
 #define MIDIMIX_NAME    "MIDI Mix"  // its ALSA sequencer client
+#ifndef LOCK_FILE  // a test build can point elsewhere
 #define LOCK_FILE       "/run/midimixd.lock"
+#endif
 #define STRIPS          8
 #define NOTE_BANK_LEFT  25
 #define NOTE_BANK_RIGHT 26
