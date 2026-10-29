@@ -40,7 +40,9 @@ class FakeMidimixd:
         self.maps = []          # every map request, in order
         self.connections = 0    # open now
         self.touch = (0, "top", 1)
+        self.bank = (1, 1)
         self.strips = [("ff0000", "drum", "Kick Kit"), ("11ff00", "plugin", "Plugin 001")]
+        self.tracks = None      # the project's track count, when it isn't len(strips)
         self.lock = threading.Lock()
         self.srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.srv.bind(path)
@@ -50,7 +52,8 @@ class FakeMidimixd:
     def state(self, mine: bool) -> str:
         with self.lock:
             seq, row, strip = self.touch
-            lines = ["midimixd 1", "midimix 1", "api 1", "bank 1 1", "tracks %d" % len(self.strips),
+            lines = ["midimixd 1", "midimix 1", "api 1", "bank %d %d" % self.bank,
+                     "tracks %d" % (self.tracks or len(self.strips)),
                      "map " + (self.maps[-1] if self.maps else DEFAULT), "mapfrom " + ("you" if mine else "default"),
                      "touch %d %s %d" % (seq, row, strip), "selected 1"]
             for n in range(8):
@@ -185,6 +188,15 @@ def test_sends_the_default_and_shows_the_strips(env):
     assert host.text("row_4") == "FADER: VOLUME"
     assert host.text("row_7") == "REC ARM: REC ARM"
     assert host.chunk() == DEFAULT
+
+
+def test_a_bank_with_one_track(env):
+    fake, host = env
+    fake.bank, fake.tracks, fake.strips = (2, 2), 9, [("ffd500", "midi", "MIDI 004")]
+    host.settle()
+    assert host.text("status") == "BANK 2 OF 2: TRACK 9 OF 9"
+    assert host.text("name_1") == "MIDI 004"
+    assert host.text("colour_1") == "YELLOW"
 
 
 def test_editing_a_row(env):

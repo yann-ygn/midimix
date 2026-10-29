@@ -22,6 +22,10 @@ MPC's screen and pads. Not a VST plugin.
   socket (installed service upgraded); the plugin (`mpc/plugin`) is installed and registered on the
   Key 37 and works there (page, touch picks the row, mapping in effect while it's loaded). Its page
   is a first draft to iterate on.
+- **Blocker for faders and knobs: the API's receipt retention** (found in the user's hand test,
+  2026-10-29, "midimixd and the API's command budget" below). mpc-tests fixes it first: Taiga
+  "MPC Key 37 API" US #56. Then midimixd: back off on capacity errors, coalesce gestures, keep room
+  for buttons; the page should mark strips whose track has no mixer (MIDI, CV).
 - The memory reader of milestones 1–2 (`mpc/mpcread`, "Reading MPC's state from memory" below) is
   now only behind `mpcstate`, a diagnostic tool.
 - MPC's hidden **Lua scripting** (below) could read and set every track's state but nothing
@@ -167,7 +171,9 @@ No memory reading, no MIDI Learn, nothing sent to MPC as MIDI.
   (refused if MPC changed it in between). The LED shows the press at once; a refused press flashes
   3 times.
 - **Faders:** track volume with pickup (soft takeover), on the API's normalized scale (MPC's fader
-  position, 1.0 = +6 dB): CC / 127. One volume or pan command at a time, at most 10 a second.
+  position, 1.0 = +6 dB): CC / 127. One volume or pan command at a time, at most 10 a second: more
+  than the API's receipt retention allows over time (US #56, "midimixd and the API's command
+  budget" below).
 - **Pan:** each strip's bottom knob (the one above mute; user's choice 2026-10-28), with pickup like
   the faders: CC / 128, so that CC 64 is the centre (0.5), and CC 127 is hard right (1.0). The
   session's pans were all multiples of 1/128 (2026-10-28).
@@ -344,8 +350,9 @@ log, everything restored afterwards:
   started) without restarting itself. After both restarts an untitled project (Plugin 001 with
   Hype, a drum track) opened ~25 s after MPC started, nobody touching the screen as far as we know;
   after a boot MPC stays on Select Demo.
-- Not checked yet: a Midimix replug, more than 8 tracks (bank 2, the API's 16-track pages), MIDI /
-  CV / keygroup tracks, presses by hand on the hardware (the knobs' CCs other than 16 come from the
+- Bank 2 and a MIDI track's mute: checked 2026-10-29 (milestone 5, below).
+- Not checked yet: a Midimix replug, more than 16 tracks (the API's 16-track pages), CV / keygroup
+  tracks, presses by hand on the hardware (the knobs' CCs other than 16 come from the
   Midimix's default map, not a capture).
 - Milestone 2 (2026-10-24, memory reader) was checked with a usbmon capture of bus 3: every LED
   message reaches the Midimix. Checked again through the service (2026-10-28, below).
@@ -446,8 +453,38 @@ installed):
   plugin's back.
 - Replacing the editor by Hype, and loading another project (DnB demo), each dropped its mapping
   (midimixd back to the default, within 1 s for the project load).
-- Not checked yet: a saved project bringing its mapping back (needs saving a project: ask), the
-  page's Q-Links, more than 8 tracks, presses by hand.
+- More than 8 tracks (DnB demo + 4 MIDI tracks, 9 in all): bank right gave bank 2 (tracks 9–16) in
+  midimixd and on the page ("BANK 2 OF 2: TRACK 9 OF 9" since; it read "TRACKS 9-9" before), and mute
+  on track 9, a MIDI track, applied and undone (27 / 37 ms).
+- A saved project brings its mapping back: saved with `top=send2 mute=select` as
+  `/storage/MPC Documents/Midimix test.xpj` (+ `_[ProjectData]`, user's OK; a test project, can go),
+  Pop demo loaded (default mapping), then it again: midimixd had the editor's mapping 1.6 s into the
+  load. MPC's SAVE and LOAD buttons did nothing through the MCP (their learned notes?); MENU > SAVE >
+  Project As and the browser's LOAD did. The `.xpj` isn't plain text (no plugin name in it).
+- By hand (user, 2026-10-29, Midimix test project): the page's Q-Links worked. Faders 1–5 picked
+  up and set their tracks' volume; 6–8 did nothing: those strips were MIDI tracks, which have no
+  mixer in the API (MIDI / CV mixer unqualified), so there is nothing to pick up and no feedback
+  either. Then everything failed: below.
+- Not checked yet: more than 16 tracks (the API's pages).
+
+## midimixd and the API's command budget (found 2026-10-29)
+
+- The API keeps every accepted command's receipt at least 600 s, 128 at most, shared by every
+  same-UID client (`native-api/README.md`: 16 pending, 128 retained, pressure gives `QUEUE_FULL` or
+  `RETENTION_CAPACITY` without evicting). Its own findings say clients should coalesce gestures and
+  that continuous control is unqualified.
+- midimixd sends up to 10 level commands a second while a fader or knob moves, so about 13 s of
+  movement fills the 128. In the user's test (a few fader and pan gestures over ~3.5 minutes, plus
+  ~25 presses) every command from root was then refused with `RETENTION_CAPACITY` (78 refusals in
+  2 minutes), mute presses included, until receipts expired: the buttons, the point of the bridge,
+  stopped working. midimixd also let go of the control at each refusal and caught it again on the
+  next message: a "picks up / lets go" line pair per CC.
+- Asked of mpc-tests (user's choice, fixed there first): Taiga "MPC Key 37 API" US #56, a retention
+  mode for continuous numeric commands bounded per control (supersede or no retention), with
+  discrete commands kept apart so they can't be starved.
+- Still to do in midimixd whatever the API does: treat `RETENTION_CAPACITY` / `QUEUE_FULL` as
+  backpressure (keep the control, pause, log once), coalesce gestures, never let levels use the
+  receipts buttons need.
 
 ## Recon
 

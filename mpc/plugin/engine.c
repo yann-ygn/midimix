@@ -141,8 +141,11 @@ static int status(const inst_t *in, char *buf, int len)
     if (!s->tracks)
         return snprintf(buf, len, "NO TRACKS IN THE PROJECT");
     int first = (s->bank - 1) * MMD_STRIPS + 1, last = first + MMD_STRIPS - 1;
-    return snprintf(buf, len, "BANK %d OF %d: TRACKS %d-%d OF %d", s->bank, s->banks, first,
-                    last < s->tracks ? last : s->tracks, s->tracks);
+    if (last > s->tracks)
+        last = s->tracks;
+    if (first == last)
+        return snprintf(buf, len, "BANK %d OF %d: TRACK %d OF %d", s->bank, s->banks, first, s->tracks);
+    return snprintf(buf, len, "BANK %d OF %d: TRACKS %d-%d OF %d", s->bank, s->banks, first, last, s->tracks);
 }
 
 static int hint(const inst_t *in, char *buf, int len)
