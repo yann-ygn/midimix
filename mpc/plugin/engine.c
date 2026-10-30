@@ -8,7 +8,8 @@
  *   to a palette of 12 hues and grey, images/colour_*.svg, NONE for a strip without a track); the 7 rows (row_<n>, a
  *   list: tap one to pick it, or touch one of its controls on the Midimix); and the picked row's targets (edit_level
  *   or edit_button, the one rowkind says).
- * - The editor's own track is a strip like any other: the API can't tell it apart yet (a VST2's plugin isn't named).
+ * - The editor's own track gets no strip: midimixd leaves out the tracks holding it (or Torpedo Control), which the
+ *   native API names since 0.17.0. The page's track numbers count the tracks with a strip.
  * - MPC sets parameter 0 to the far end of its range and back on insert and on every STOP (vst2_wrap.c): parameter 0
  *   is the status line, which takes nothing.
  * - MIDIMIXD_SOCKET in the environment overrides the control socket's path (tests). */

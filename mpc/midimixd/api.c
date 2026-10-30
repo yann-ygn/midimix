@@ -157,6 +157,7 @@ static int fill_track(struct api_track *t, int node) {
     }
     v = json_num(&js, json_path(&js, node, "setup.colour"), -1);
     t->colour = v >= 0 && v <= 0xffffff ? (long)v : -1;
+    copy(t->product, sizeof t->product, json_str(&js, json_path(&js, node, "instrument.productId")));
     return 0;
 }
 
@@ -199,7 +200,8 @@ static int apply_snapshot(int st) {
 }
 
 // Controls for some tracks (a page of at most 16), matched by trackId. Names and order stay as the
-// last snapshot had them: a topology change brings a new snapshot.
+// last snapshot had them: a topology change brings a new snapshot. So do colours and instruments, which
+// only full snapshots have.
 static int apply_change(int frame) {
     const char *inst = json_str(&js, json_get(&js, frame, "instanceId"));
     const char *proj = json_str(&js, json_get(&js, frame, "projectId"));
@@ -214,6 +216,7 @@ static int apply_change(int frame) {
         for (int k = 0; k < api.n; k++)
             if (!strcmp(api.t[k].id, t.id)) {
                 t.colour = api.t[k].colour;
+                memcpy(t.product, api.t[k].product, sizeof t.product);
                 api.t[k] = t;
                 break;
             }
@@ -382,8 +385,10 @@ int api_send(enum api_op op, int t, int index, double value, int expected) {
     if (op == API_SELECT) {
         // the target alone
     } else if (op == API_VOLUME || op == API_PAN || op == API_SEND) {
+        // continuous (API 0.18.0): one receipt per control, superseded by its next request (a fresh ID
+        // each time), so a moving fader can't use up the 128 that buttons need for 10 minutes.
         value = value < 0 ? 0 : value > 1 ? 1 : value;
-        len += (size_t)snprintf(req + len, sizeof req - len, ",\"value\":%.9g", value);
+        len += (size_t)snprintf(req + len, sizeof req - len, ",\"value\":%.9g,\"continuous\":true", value);
     } else {
         len += (size_t)snprintf(req + len, sizeof req - len, ",\"value\":%s", value ? "true" : "false");
         if (expected >= 0)

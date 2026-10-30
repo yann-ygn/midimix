@@ -1,4 +1,4 @@
-// api: midimixd's client for mpc-tests' native API (the "MPC Native API" addin in MPC, 0.16.0:
+// api: midimixd's client for mpc-tests' native API (the "MPC Native API" addin in MPC, 0.18.0:
 // ../mpc/native-api/README.md and WATCH.md) on its Unix socket. A watch subscription keeps the
 // model below current (a full snapshot, then changes); commands go out on one short connection
 // each and come back as receipts. Everything is non-blocking, driven by the program's poll loop.
@@ -16,6 +16,7 @@
 #define API_ID_LEN     40   // instance "run_<32 hex>", or a decimal object ID
 #define API_SENDS      4    // sends A-D
 #define API_INSERTS    4    // insert slots 1-4
+#define API_PRODUCT_LEN 256  // the API's bound for an instrument's productId, NUL included
 
 struct api_track {
     char id[API_ID_LEN];         // trackId: what commands name
@@ -27,6 +28,9 @@ struct api_track {
     float send[API_SENDS];                  // normalized 0-1, or -1
     signed char insert[API_INSERTS];        // an occupied slot's enable: 1, 0, or -1 (empty, not readable)
     long colour;  // RGB24 (setup.colour), -1 unknown; only full snapshots have it: changes keep the last
+    // instrument.productId of the plugin on a plugin track ("MPC:Hype", "VST:<UID>:<library path>"), ""
+    // when the API names none. Like colour, only full snapshots have it.
+    char product[API_PRODUCT_LEN];
 };
 
 struct api_state {
@@ -62,6 +66,9 @@ void api_init(void (*on_result)(const struct api_result *));
 // Sends a command to track t (an index in api.t): value 0 / 1 for the flags and API_INSERT, 0-1 for
 // API_VOLUME, API_PAN and API_SEND; index: the send or insert slot (0-3). expected 0 / 1: the flag's
 // value MPC must still have when the command runs, or -1. API_SELECT selects the track (no value).
+// Levels go as the API's continuous kind: each control's receipt replaces its last one, apart from the
+// receipts the other commands keep. The API refuses one with QUEUE_FULL or RETENTION_CAPACITY when
+// that kind is busy (nothing ran).
 // Returns an id > 0, passed back once with the result; -1 if nothing was sent.
 int api_send(enum api_op op, int t, int index, double value, int expected);
 // The sockets to poll (POLLIN), and what to do with their events.

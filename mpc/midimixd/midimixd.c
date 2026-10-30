@@ -6,7 +6,8 @@
 //
 // Exits with status 3 when another midimixd is running (the systemd unit, see install.sh).
 //
-// Strips: 8 tracks at a time in MPC's Track List order; bank left / right page by 8.
+// Strips: 8 tracks at a time in MPC's Track List order; bank left / right page by 8. Tracks holding a
+// plugin of the setup rather than of the music (this editor, Torpedo Control) get no strip.
 // Mapping (map.h): what each row of the strips does, the same for the 8 strips. By default the faders
 // set the volume, the bottom knobs (above mute) the pan, the buttons mute / solo / rec arm, and the top
 // two knobs nothing. The editor plugin replaces it through the control socket (ctl.h) while it's loaded.
@@ -19,7 +20,8 @@
 // Knobs and faders: their level (volume, pan, a send) on the strip's track, once they reach it
 // (pickup). Pan: CC 64 = centre. A change of that level on MPC's side lets go of the control until it
 // reaches the new level. One level command at a time, at most 10 a second: a moving control sends its
-// latest position. The master fader does nothing.
+// latest position. When the API is too busy for one, the control waits and then sends its latest
+// position. The master fader does nothing.
 // The Midimix is found by its sequencer client's name and followed through replugs; the API is
 // followed through restarts (MPC's, or the addin's).
 
@@ -90,6 +92,7 @@ static void touch(int row, int strip) {
 #define FLASHES    3
 #define CONFIRM_S  0.6   // an applied press outranks the watch (sampled every 100 ms) this long
 #define MIXER_GAP  0.1   // between level commands
+#define BUSY_S     0.5   // after the API was too busy for a level command, before the next one
 #define RELEASE_S  0.5   // after the last level sent: MPC's level must be that one, or let go
 
 int verbose;
@@ -196,7 +199,55 @@ static void send_note(int note, int velocity) {
 
 // --- tracks and banks ---
 
+// Plugins of the setup rather than of the music: the tracks holding them get no strip. A VST's productId
+// (API 0.17.0) is "VST:<its UID in hex>:<its library's path>": matched by UID and file name, wherever
+// the plugin is installed.
+static const struct {
+    const char *uid, *file;
+} SETUP_PLUGINS[] = {
+    {"VST:4d6d4564:", "/midimix_editor.so"},   // ygn - VST - Midimix Editor (MmEd): mpc/plugin, this editor
+    {"VST:54704c76:", "/torpedo_control.so"},  // ygn - VST - Torpedo Control (TpLv): ../torpedo
+};
+
 static int bank;
+static int lane[API_MAX_TRACKS], lanes;  // the tracks with a strip (indexes in api.t), in Track List order
+
+static int setup_plugin(const struct api_track *tr) {
+    size_t n = strlen(tr->product);
+    for (size_t i = 0; i < sizeof SETUP_PLUGINS / sizeof *SETUP_PLUGINS; i++) {
+        size_t u = strlen(SETUP_PLUGINS[i].uid), f = strlen(SETUP_PLUGINS[i].file);
+        if (n > u + f && !strncmp(tr->product, SETUP_PLUGINS[i].uid, u) && !strcmp(tr->product + n - f, SETUP_PLUGINS[i].file))
+            return 1;
+    }
+    return 0;
+}
+
+// Rebuilds the strips' tracks from api: after anything that can change it (api_tick, api_events).
+static void lanes_update(void) {
+    static char logged[160];
+    char left_out[sizeof logged] = "";
+    size_t len = 0;
+    lanes = 0;
+    for (int t = 0; api.live && t < api.n; t++) {
+        if (!setup_plugin(&api.t[t])) {
+            lane[lanes++] = t;
+        } else if (len < sizeof left_out) {
+            int r = snprintf(left_out + len, sizeof left_out - len, "%s%d (%s)", len ? ", " : "", t + 1, api.t[t].name);
+            len += r > 0 ? (size_t)r : 0;
+        }
+    }
+    if (api.live && strcmp(left_out, logged)) {
+        if (left_out[0]) say("tracks without a strip (setup plugins): %s", left_out);
+        else if (logged[0]) say("every track has a strip");
+        snprintf(logged, sizeof logged, "%s", left_out);
+    }
+}
+
+// The track (an index in api.t) on strip n of the bank shown, or -1.
+static int strip_track(int n) {
+    int k = bank * STRIPS + n;
+    return k < lanes ? lane[k] : -1;
+}
 
 static int track_index(const char *id) {
     for (int t = 0; t < api.n; t++)
@@ -220,7 +271,9 @@ static int note_at(int row, int n) { return 3 * n + 1 + row - ROW_MUTE; }
 
 // The note of track t's button in this row, or 0 when the track isn't in the current bank.
 static int note_of(int t, int row) {
-    return t >= bank * STRIPS && t < (bank + 1) * STRIPS ? note_at(row, t - bank * STRIPS) : 0;
+    for (int n = 0; n < STRIPS; n++)
+        if (strip_track(n) == t) return note_at(row, n);
+    return 0;
 }
 
 static void ctls_release_all(void);
@@ -228,7 +281,10 @@ static void ctls_release_all(void);
 static void set_bank(int b, const char *why) {
     bank = b;
     ctls_release_all();  // their tracks changed
-    say("bank %d: tracks %d-%d%s", bank + 1, bank * STRIPS + 1, bank * STRIPS + STRIPS, why);
+    int first = strip_track(0), last = first;
+    for (int n = 1; n < STRIPS && strip_track(n) >= 0; n++) last = strip_track(n);
+    if (first < 0) say("bank %d: no tracks%s", bank + 1, why);
+    else say("bank %d: tracks %d-%d%s", bank + 1, first + 1, last + 1, why);
 }
 
 // --- button presses ---
@@ -272,9 +328,9 @@ static enum api_op button_op(int target) {
 }
 
 static void press(int row, int strip) {
-    int target = map[row], note = note_at(row, strip), t = bank * STRIPS + strip;
+    int target = map[row], note = note_at(row, strip), t = strip_track(strip);
     touch(row, strip);
-    if (target == T_NONE || !api.live || t >= api.n) return;
+    if (target == T_NONE || t < 0) return;
     const struct api_track *tr = &api.t[t];
     const char *what = map_target_name[target];
     int cur = shown(tr, target);
@@ -369,10 +425,10 @@ static void ctls_release_all(void) {
 
 static void ctl_move(int row, int n, int v) {
     struct ctl *c = &ctls[row][n];
-    int prev = c->cc, t = bank * STRIPS + n, target = map[row];
+    int prev = c->cc, t = strip_track(n), target = map[row];
     c->cc = v;
     touch(row, n);
-    if (target == T_NONE || !api.live || t >= api.n) return;
+    if (target == T_NONE || t < 0) return;
     const struct api_track *tr = &api.t[t];
     if (!c->caught) {
         double lv = level_of(tr, target);
@@ -393,10 +449,10 @@ static void ctls_tick(double t) {
     for (int row = 0; row < MAP_LEVEL_ROWS; row++)
         for (int n = 0; n < STRIPS; n++) {
             struct ctl *c = &ctls[row][n];
-            int k = bank * STRIPS + n, target = map[row];
+            int k = strip_track(n), target = map[row];
             if (!c->caught) continue;
-            if (!api.live || k >= api.n || strcmp(api.t[k].id, c->track)) {
-                release(row, n, api.live ? "its track is gone" : "no current state from MPC");
+            if (k < 0 || strcmp(api.t[k].id, c->track)) {
+                release(row, n, api.live ? "its strip's track changed" : "no current state from MPC");
                 continue;
             }
             if (c->want < 0 && !(mixer_id && mixer_row == row && mixer_strip == n) && t - c->sent_at > RELEASE_S &&
@@ -410,9 +466,9 @@ static void ctls_tick(double t) {
     for (int i = 1; i <= MAP_LEVEL_ROWS * STRIPS; i++) {  // round robin, from the control after the last one sent
         int j = (mixer_last + i) % (MAP_LEVEL_ROWS * STRIPS), row = j / STRIPS, n = j % STRIPS, target = map[row];
         struct ctl *c = &ctls[row][n];
-        if (!c->caught || c->want < 0) continue;
+        if (!c->caught || c->want < 0 || strip_track(n) < 0) continue;
         enum api_op op = target == T_VOLUME ? API_VOLUME : target == T_PAN ? API_PAN : API_SEND;
-        int id = api_send(op, bank * STRIPS + n, target - T_SEND1, c->want, -1);
+        int id = api_send(op, strip_track(n), target - T_SEND1, c->want, -1);
         if (id < 0) {
             release(row, n, "can't send");
             continue;
@@ -430,16 +486,31 @@ static void ctls_tick(double t) {
 }
 
 static void mixer_result(const struct api_result *r) {
+    static int busy;  // the API was too busy for the last one: logged once, until one goes through
     if (r->id != mixer_id) return;
     mixer_id = 0;
     if (verbose)
-        say("%s track %d: %s (%d ms)", r->op == API_SEND ? "send" : r->op == API_PAN ? "pan" : "volume",
-            track_index(r->track) + 1, r->status, r->total_ms);
+        say("%s track %d: %s%s%s (%d ms)", r->op == API_SEND ? "send" : r->op == API_PAN ? "pan" : "volume",
+            track_index(r->track) + 1, r->status, r->error ? " " : "", r->error ? r->error : "", r->total_ms);
+    // Whatever happens, only a control still holding that track (not after a bank change, say).
+    struct ctl *c = &ctls[mixer_row][mixer_strip];
+    int held = c->caught && !strcmp(c->track, r->track);
+    // Too busy (the API's continuous commands all pending, or this control's last one still is): nothing
+    // ran. The control keeps the track, and sends its latest level after a pause.
+    if (r->error && (!strcmp(r->error, "QUEUE_FULL") || !strcmp(r->error, "RETENTION_CAPACITY"))) {
+        if (!busy) say("API: too busy for levels (%s), they wait", r->error);
+        busy = 1;
+        mixer_next = now() + BUSY_S;
+        if (held && c->want < 0) c->want = c->sent;
+        return;
+    }
+    if (busy && !strcmp(r->status, "applied")) {
+        busy = 0;
+        say("API: levels go through again");
+    }
     // unknown: the level may be back under MPC's automation already; the watch will tell. A refusal
-    // releases the control only if it still holds that track (not after a bank change, say).
-    const struct ctl *c = &ctls[mixer_row][mixer_strip];
-    if (strcmp(r->status, "applied") && strcmp(r->status, "unknown") && strcmp(r->status, "accepted") && c->caught &&
-        !strcmp(c->track, r->track))
+    // releases the control.
+    if (strcmp(r->status, "applied") && strcmp(r->status, "unknown") && strcmp(r->status, "accepted") && held)
         release(mixer_row, mixer_strip, r->error ? r->error : r->status);
 }
 
@@ -466,7 +537,7 @@ static void map_follow(void) {
 //   midimix 0|1                      the Midimix is there
 //   api 0|1                          MPC's state is current
 //   bank <n> <banks>                 the bank shown (from 1) and how many there are
-//   tracks <n>
+//   tracks <n>                       the tracks with a strip (not those holding a setup plugin)
 //   map <spec>                       the mapping in effect (map.h)
 //   mapfrom you|other|default        whose: this connection's, another's, midimixd's default
 //   touch <seq> <row> <strip>        the last control touched: seq counts touches (0: none yet)
@@ -483,21 +554,21 @@ static void addf(char *buf, size_t cap, size_t *n, const char *fmt, ...) {
 
 size_t ctl_state(int c, char *buf, size_t cap) {
     size_t n = 0;
-    int owner, banks = api.live && api.n ? (api.n + STRIPS - 1) / STRIPS : 1, sel = 0;
+    int owner, banks = lanes ? (lanes + STRIPS - 1) / STRIPS : 1, sel = 0;
     ctl_map(&owner);
     char spec[MAP_SPEC_MAX];
     map_format(map, spec, sizeof spec);
     addf(buf, cap, &n, "midimixd 1\nmidimix %d\napi %d\nbank %d %d\ntracks %d\nmap %s\nmapfrom %s\n", midimix_up, api.live, bank + 1,
-        banks, api.live ? api.n : 0, spec, owner == c ? "you" : owner >= 0 ? "other" : "default");
+        banks, lanes, spec, owner == c ? "you" : owner >= 0 ? "other" : "default");
     addf(buf, cap, &n, "touch %u %s %d\n", touched.seq, map_row_name[touched.row], touched.strip + 1);
-    for (int s = 0; s < STRIPS && api.live; s++) {
-        int t = bank * STRIPS + s;
-        if (t < api.n && api.selected[0] && !strcmp(api.t[t].id, api.selected)) sel = s + 1;
+    for (int s = 0; s < STRIPS; s++) {
+        int t = strip_track(s);
+        if (t >= 0 && api.selected[0] && !strcmp(api.t[t].id, api.selected)) sel = s + 1;
     }
     addf(buf, cap, &n, "selected %d\n", sel);
     for (int s = 0; s < STRIPS; s++) {
-        int t = bank * STRIPS + s;
-        if (!api.live || t >= api.n) {
+        int t = strip_track(s);
+        if (t < 0) {
             addf(buf, cap, &n, "strip %d - - \n", s + 1);
             continue;
         }
@@ -522,8 +593,8 @@ static void leds_flush(double t) {
     if (!midimix_up) return;
     if (api.live) {
         for (int n = 0; n < STRIPS; n++) {
-            int k = bank * STRIPS + n;
-            if (k >= api.n) break;
+            int k = strip_track(n);
+            if (k < 0) break;
             const struct api_track *tr = &api.t[k];
             for (int row = ROW_MUTE; row < MAP_ROWS; row++) {
                 int target = map[row];
@@ -535,7 +606,7 @@ static void leds_flush(double t) {
             }
         }
         want[NOTE_BANK_LEFT] = bank > 0 ? ON : 0;
-        want[NOTE_BANK_RIGHT] = (bank + 1) * STRIPS < api.n ? ON : 0;
+        want[NOTE_BANK_RIGHT] = (bank + 1) * STRIPS < lanes ? ON : 0;
     }
     for (int note = 1; note < LEDS; note++)
         if (flash_until[note] > t) want[note] = (int)((flash_until[note] - t) / FLASH_S) % 2 ? ON : 0;
@@ -557,7 +628,7 @@ static void handle(const struct snd_seq_event *ev) {
         if (!ev->data.note.velocity) break;
         if (note >= 1 && note <= 3 * STRIPS) press(ROW_MUTE + (note - 1) % 3, (note - 1) / 3);
         if (note == NOTE_BANK_LEFT && bank > 0) set_bank(bank - 1, "");
-        if (note == NOTE_BANK_RIGHT && api.live && (bank + 1) * STRIPS < api.n) set_bank(bank + 1, "");
+        if (note == NOTE_BANK_RIGHT && (bank + 1) * STRIPS < lanes) set_bank(bank + 1, "");
         break;
     }
     case SNDRV_SEQ_EVENT_CONTROLLER: {
@@ -636,9 +707,10 @@ int main(int argc, char **argv) {
     while (!stop) {
         double t = now();
         api_tick(t);
+        lanes_update();
         presses_tick(t);
-        if (bank > 0 && api.live && bank * STRIPS >= api.n)
-            set_bank(api.n ? (api.n - 1) / STRIPS : 0, " (tracks deleted)");
+        if (bank > 0 && api.live && bank * STRIPS >= lanes)
+            set_bank(lanes ? (lanes - 1) / STRIPS : 0, " (fewer tracks)");
         map_follow();
         ctls_tick(t);
         if (t >= next_blink) {
@@ -653,6 +725,7 @@ int main(int argc, char **argv) {
         if (poll(fds, (nfds_t)(1 + na + nc), TICK_MS) > 0) {
             if (fds[0].revents) read_events();
             api_events(fds + 1, na);
+            lanes_update();  // before the control socket reads the strips
             ctl_events(fds + 1 + na, nc);
         }
     }

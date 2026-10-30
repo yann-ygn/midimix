@@ -9,9 +9,12 @@ MPC's screen and pads. Not a VST plugin.
 ## Status (2026-10-29)
 
 - Recon done on the Key 37 (MPC 3.9.1.2), see below.
-- mpc-tests' API is 0.16.0 on the Key 37 (2026-10-29): nothing midimixd reads or sends changed,
-  and the running service carried on through the upgrades ("MPC's native API" below). 0.16.0 names
-  a plugin track's plugin, but only for MPC-format plugins: not the editor's VST2.
+- mpc-tests' API is 0.18.0 on the Key 37 (2026-10-30): nothing midimixd reads or sends changed,
+  and the running service carried on through the upgrades ("MPC's native API" below). 0.17.0 names
+  VST plugins too (US #57), 0.18.0 has an opt-in `continuous` mode for volume, pan and sends
+  (US #56). midimixd uses both since 2026-10-30 (checked from `/tmp`, then installed and checked
+  through a reboot): tracks holding the editor or Torpedo Control get no strip, levels go as
+  continuous commands and wait when the API is busy.
 - Midimix LEDs answer note on vel 127 on the same note (checked with `seqtool`, 2026-10-22).
 - The bridge (`mpc/midimixd`, below) runs on mpc-tests' **native API**, an addin inside MPC ("MPC's
   native API" below): LEDs from its watch stream, buttons, faders and pan knobs as its commands.
@@ -23,9 +26,10 @@ MPC's screen and pads. Not a VST plugin.
   Key 37 and works there (page, touch picks the row, mapping in effect while it's loaded). Its page
   is a first draft to iterate on.
 - **Blocker for faders and knobs: the API's receipt retention** (found in the user's hand test,
-  2026-10-29, "midimixd and the API's command budget" below). mpc-tests fixes it first: Taiga
-  "MPC Key 37 API" US #56. Then midimixd: back off on capacity errors, coalesce gestures, keep room
-  for buttons; the page should mark strips whose track has no mixer (MIDI, CV).
+  2026-10-29, "midimixd and the API's command budget" below). Fixed in 0.18.0 (Taiga "MPC Key 37
+  API" US #56, installed 2026-10-30) and in midimixd (continuous levels, waiting when the API is
+  busy; checked from `/tmp` 2026-10-30, installed the same day). Still to do: try it by hand; the
+  page should mark strips whose track has no mixer (MIDI, CV).
 - The memory reader of milestones 1–2 (`mpc/mpcread`, "Reading MPC's state from memory" below) is
   now only behind `mpcstate`, a diagnostic tool.
 - MPC's hidden **Lua scripting** (below) could read and set every track's state but nothing
@@ -161,7 +165,9 @@ No memory reading, no MIDI Learn, nothing sent to MPC as MIDI.
   subscriber, so without one LED messages failed (`ENODEV`) whenever MPC's wasn't there (at boot,
   2026-10-28). MPC's own Midimix input (CONTROL on, nothing learned) stays harmless.
 - **Banks:** strips follow tracks 1–8, bank left / right page by 8 (user's choice). Strip n of bank b
-  is the track with `uiIndex` 8b + n: MPC's Track List order, audio tracks included.
+  is the (8b + n)th track with a strip, in MPC's Track List order (`uiIndex`), audio tracks included.
+  Tracks holding a setup plugin, the editor or Torpedo Control (user's choice 2026-10-30), get none
+  (`SETUP_PLUGINS` in `midimixd.c`, below).
 - **LEDs** (decided with the user 2026-10-24): mute steady = muted, **blinking (2 Hz) = silenced by
   another track's solo**, off = audible; solo notes = soloed (the Midimix shows them on the mute
   row while SOLO is held, by itself: SOLO is a modifier); arm = armed; bank left / right lit when
@@ -171,9 +177,9 @@ No memory reading, no MIDI Learn, nothing sent to MPC as MIDI.
   (refused if MPC changed it in between). The LED shows the press at once; a refused press flashes
   3 times.
 - **Faders:** track volume with pickup (soft takeover), on the API's normalized scale (MPC's fader
-  position, 1.0 = +6 dB): CC / 127. One volume or pan command at a time, at most 10 a second: more
-  than the API's receipt retention allows over time (US #56, "midimixd and the API's command
-  budget" below).
+  position, 1.0 = +6 dB): CC / 127. One level command at a time, at most 10 a second, as the API's
+  continuous kind (0.18.0, "midimixd and the API's command budget" below); when the API is too busy
+  for one, the control keeps its track and sends its latest position 0.5 s later.
 - **Pan:** each strip's bottom knob (the one above mute; user's choice 2026-10-28), with pickup like
   the faders: CC / 128, so that CC 64 is the centre (0.5), and CC 127 is hard right (1.0). The
   session's pans were all multiples of 1/128 (2026-10-28).
@@ -214,19 +220,22 @@ No memory reading, no MIDI Learn, nothing sent to MPC as MIDI.
   on / off (`set_insert_enabled`, the LED showing the slot), select the strip's track
   (`select_track`, the LED lit on the selected track's strip; user's choice 2026-10-29) or nothing.
   Per-control exceptions maybe later. The master fader stays free (no API setter for it).
-- **The editor's own track** is a plugin track, so it is in the Track List and takes a strip like
-  any other, for now (user's choice 2026-10-29: skip it once the API can name it). The API can't
-  rename a track, and since 0.16.0 it names a track's plugin only for MPC-format plugins: Torpedo
-  Control, a VST2 on the same wrapper, reads `unsupported` (checked 2026-10-29, "MPC's native API"
-  below), so it can't tell the editor's track from another VST's. Needs the API to qualify the VST
-  format (mpc-tests). MPC adds new tracks at the end, so it usually takes the strip after the user's.
+- **The editor's own track** gets no strip (user's choice 2026-10-29), nor does Torpedo Control's
+  (2026-10-30). Since 0.17.0 (US #57) the API names VST plugins: the editor's track reads
+  `productId` `VST:4d6d4564:/storage/Synths/ygn - VST - Midimix Editor/midimix_editor.so` (UID
+  `MmEd` plus the library's path; checked on the installed 0.18.0 2026-10-30, "MPC's native API"
+  below). midimixd matches the UID and the file name (`/midimix_editor.so`, `/torpedo_control.so`),
+  wherever the plugin is installed. The `productId` only comes in full snapshots, so a track takes
+  or loses its strip within 5 s of a plugin load (the editor's lost it 0.6 s after the editor
+  connected to midimixd, in the checks below). The page's track numbers count the tracks with a
+  strip.
 - **On the plugin's page** the API refuses track commands (`NOT_READY`, checked 2026-10-29: only
   Main, the Channel Mixer pages and Track Mute qualify): picking a row from the Midimix still works
   (only the plugin hears it), trying the mapping means leaving the page. `select_track` works there
   (52 ms), and MPC then leaves the page for the selected track's edit screen. A new skin needs an
   `acvs` restart: ask first (as in torpedo); a new `.so` alone is taken at the plugin's next load.
 
-## MPC's native API (mpc-tests' `mpc-native-api` addin, 0.16.0, checked 2026-10-29)
+## MPC's native API (mpc-tests' `mpc-native-api` addin, 0.18.0, checked 2026-10-30)
 
 Source and docs in the sibling repo `../mpc` (`native-api/README.md`, `native-api/WATCH.md`,
 `findings/native-*.md`). An addin inside MPC (`/data/mpc-addins/mpc-native-api`), pinned to
@@ -273,6 +282,26 @@ Source and docs in the sibling repo `../mpc` (`native-api/README.md`, `native-ap
   null; the `trackId` stayed. `productId` names a product, shared by every track holding it, not an
   instance. Like `setup`, `instrument` only comes in full snapshots (within 5 s of a change); a
   plugin load can drop the watch (`CONTINUITY_LOST`, once over the two loads).
+- **0.17.0** (US #57, `findings/native-vst-instrument-identity.md`): VST plugins get names too,
+  `productId` `VST:<descriptor UID, 8 hex digits>:<the library's absolute path>`. To be compared
+  whole: it changes if the library moves or its UID changes, not with a reinstall or an update in
+  place. Discovery's `instrumentIdentity.formats` is `["MPC", "VST"]`; VST3 and other formats stay
+  `unsupported`. Checked on the installed 0.18.0 (2026-10-30, untitled project): the Midimix Editor
+  loaded on Plugin 001 read `available`, `"Midimix Editor"`,
+  `"VST:4d6d4564:/storage/Synths/ygn - VST - Midimix Editor/midimix_editor.so"`, its `trackId`
+  kept; Fabric XL (Awakening, as found) put back after. mpc-tests' findings give Torpedo Control's
+  as `VST:54704c76:/storage/Synths/ygn - VST - Torpedo Control/torpedo_control.so`.
+- **0.18.0** (US #56, installed 2026-10-30 by mpc-tests from `51685f4`, clean tree, MPC
+  restarted; `findings/native-continuous-mixer.md`): `set_volume`, `set_pan`, `set_send_level` take
+  `"continuous": true`. Those requests use their own pool (64 controls, 8 pending; a control is
+  caller + track + operation + send index, one record each): a new request replaces the control's
+  completed receipt; a new value while its last one is still pending is refused with `QUEUE_FULL`;
+  `RETENTION_CAPACITY` when no record is free. The 16 pending and 128 retained slots are kept for
+  the other commands (flags, inserts, select, numeric ones without the option), which continuous
+  traffic can't take or evict. Receipts say `"retention": "supersedable"`; a superseded request ID
+  reads `OUTCOME_UNAVAILABLE` and must never be retried: a fresh ID per value. Measured by mpc-tests
+  on the Key 37: 10 updates a second over 2 and 8 tracks for 3 minutes each, all applied, with
+  mute / solo / arm presses between them. Discovery: `continuousMixer`.
 - **Identity:** each project load gives a new `projectId` (mpc-tests' `findings/native-identity.md`;
   midimixd's log showed 1, 130, 264 during 0.15.0's checks). A rename or reorder keeps a track's
   `trackId`; after adding, removing or reordering a track the watch sends a full snapshot before any
@@ -346,8 +375,8 @@ log, everything restored afterwards:
   frame "?"`), then midimixd carried on by itself. They were the API's `NOT_READY` refusals ("MPC's
   native API" above): since 2026-10-29 midimixd logs the code once and retries every second (tested
   against a fake API socket on the host, then through a reboot: below).
-- It followed the API's 0.15.0 and 0.16.0 installs (2026-10-29: MPC restarted, the API stopped and
-  started) without restarting itself. After both restarts an untitled project (Plugin 001 with
+- It followed the API's 0.15.0, 0.16.0 (2026-10-29) and 0.18.0 (2026-10-30) installs (MPC
+  restarted, the API stopped and started) without restarting itself. After both restarts an untitled project (Plugin 001 with
   Hype, a drum track) opened ~25 s after MPC started, nobody touching the screen as far as we know;
   after a boot MPC stays on Select Demo.
 - Bank 2 and a MIDI track's mute: checked 2026-10-29 (milestone 5, below).
@@ -357,7 +386,7 @@ log, everything restored afterwards:
 - Milestone 2 (2026-10-24, memory reader) was checked with a usbmon capture of bus 3: every LED
   message reaches the Midimix. Checked again through the service (2026-10-28, below).
 
-## midimixd as a service (milestone 4, installed on the Key 37 2026-10-28, upgraded 2026-10-29)
+## midimixd as a service (milestone 4, installed on the Key 37 2026-10-28, upgraded 2026-10-29 and 2026-10-30)
 
 - `make -C mpc install` copies `midimixd/install.sh` and its files to `/tmp/midimixd-install` on the
   MPC and runs it: `/data/midimixd/midimixd` and `uninstall.sh`, `/etc/systemd/system/midimixd.service`
@@ -384,6 +413,11 @@ log, everything restored afterwards:
   midimixd started at 9.8 s with MPC and subscribed to the Midimix both ways, the API's socket
   appeared at 10.0 s, then refused the watch (`NOT_READY`, logged once) until MPC's startup screen;
   midimixd read its state at 20.0 s (Select Demo, 0 tracks). No `sending failed` in its log.
+- Upgraded 2026-10-30 (continuous levels, setup plugins' tracks left out; installed binary's
+  SHA-256 matches the build), then a reboot (user's OK, default project): MPC started at 9.42 s,
+  midimixd at 9.46 s, subscribed to the Midimix both ways, `NOT_READY` logged once, MPC's state read
+  10.1 s later (Select Demo, 0 tracks); no `sending failed`. The previous build had come through the
+  user's own reboot a minute earlier the same way.
 - Not checked yet: the LEDs going off while MPC restarts with a project open.
 
 ## Milestone 5: the mapping and the editor plugin (2026-10-29)
@@ -398,7 +432,7 @@ installed):
 - Control socket `/run/midimixd.sock` (0600, `ctl.h`): `get`, `map <spec>` (rows not named take the
   default's), `unmap`; every reply ends with an empty line. A connection's mapping is in effect while
   it's open, the latest one set winning; none left, the default. `get` gives `midimix`, `api`,
-  `bank <n> <banks>`, `tracks`, `map`, `mapfrom you|other|default`, `touch <seq> <row> <strip>` (seq
+  `bank <n> <banks>`, `tracks` (those with a strip), `map`, `mapfrom you|other|default`, `touch <seq> <row> <strip>` (seq
   counts touches: a moving control's CCs within 0.5 s are one, a press always a new one), `selected
   <strip>`, and per strip `strip <n> <rrggbb|-> <type|-> <name>`. `midimixctl get | watch | map
   <row=target>...` talks to it (`map` holds its mapping until it's stopped).
@@ -481,10 +515,27 @@ installed):
   next message: a "picks up / lets go" line pair per CC.
 - Asked of mpc-tests (user's choice, fixed there first): Taiga "MPC Key 37 API" US #56, a retention
   mode for continuous numeric commands bounded per control (supersede or no retention), with
-  discrete commands kept apart so they can't be starved.
-- Still to do in midimixd whatever the API does: treat `RETENTION_CAPACITY` / `QUEUE_FULL` as
-  backpressure (keep the control, pause, log once), coalesce gestures, never let levels use the
-  receipts buttons need.
+  discrete commands kept apart so they can't be starved. Delivered in 0.18.0 ("MPC's native API"
+  above), installed 2026-10-30.
+- midimixd since 2026-10-30: levels (volume, pan, sends) go with `continuous: true`, so they can't
+  use the receipts buttons need. `QUEUE_FULL` / `RETENTION_CAPACITY` on a level is backpressure:
+  the control keeps its track and its latest value, waits 0.5 s (`BUSY_S`), sends again; logged once
+  ("API: too busy for levels"), then "API: levels go through again". It already used a fresh request ID
+  for every command, one level command at a time and only each control's latest value, which is
+  what the continuous mode asks of a client.
+- Checked 2026-10-30 from `/tmp` (service stopped, restarted after), untitled project:
+  - Fader 1 swept for 25 s (CCs sent to midimixd's port): 218 level commands, all
+    `continuous: true` and applied; then a mute press and its undo applied (26 ms). `get_command`:
+    requests 1 and 217 `OUTCOME_UNAVAILABLE` (superseded), 218 `applied`, `"retention":
+    "supersedable"`. Volume restored through the API (0.707945764).
+  - The busy path against a fake API (`tools/fake_api_busy.py`, forwarded with `ssh -R
+    /tmp/fake-api.sock:<local socket>`, a test build with `-DAPI_SOCKET`, `-DLOCK_FILE`,
+    `-DCTL_SOCKET`): refusals 2–4 (`QUEUE_FULL`) and 6 (`RETENTION_CAPACITY`) kept the fader; each
+    retry 0.5 s later sent its latest position; never let go.
+  - The editor, then Torpedo Control, loaded on Plugin 001: midimixd logged "tracks without a strip
+    (setup plugins): 1 (Plugin 001)", `tracks 1`, strip 1 the drum track, and strip 1's mute press
+    muted and unmuted it (25 ms), its LED following; `selected 0` (the editor's track was selected).
+    Fabric XL put back: "every track has a strip".
 
 ## Recon
 

@@ -11,7 +11,7 @@
 typedef struct {
     int up;                    /* midimixd answered the last request */
     int midimix, api;          /* the Midimix is there; MPC's state is current */
-    int bank, banks, tracks;   /* the bank shown (from 1), how many, the project's tracks */
+    int bank, banks, tracks;   /* the bank shown (from 1), how many, the tracks with a strip */
     char mapfrom[8];           /* whose mapping is in effect: "you", "other", "default" */
     char error[96];            /* midimixd refused the last mapping sent: why ("" if it took it) */
     unsigned touch_seq;        /* counts the controls touched on the Midimix (0: none yet) */
